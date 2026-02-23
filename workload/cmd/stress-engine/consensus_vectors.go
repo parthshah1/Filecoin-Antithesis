@@ -270,6 +270,12 @@ func doHeightProgression() {
 		}
 	}
 
+	// Skip during startup: if the slowest node hasn't passed the finalized
+	// minimum, it is still bootstrapping and a large spread is expected.
+	if minH < finalizedMinHeight {
+		return
+	}
+
 	// Nodes shouldn't be too far apart (>10 epochs suggests a problem)
 	spread := maxH - minH
 	acceptable := spread <= 10
