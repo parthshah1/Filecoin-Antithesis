@@ -42,7 +42,7 @@ RUN set -eux; \
     cargo --version; \
     rustc --version;
 
-    
+
 RUN git clone https://github.com/filecoin-project/curio.git /opt/curio
 WORKDIR /opt/curio
 
@@ -60,7 +60,6 @@ RUN git submodule update --init
 COPY ./go_exclude.txt ./go_exclude.txt
 
 RUN go get github.com/antithesishq/antithesis-sdk-go@latest
-RUN go get github.com/filecoin-project/go-jsonrpc@v0.8.0
 RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
 RUN go mod tidy
 
