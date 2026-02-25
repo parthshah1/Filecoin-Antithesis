@@ -115,8 +115,23 @@ func DoHeavyCompute() {
 
 const (
 	consensusWalkEpochs = 5
-	finalizedMinHeight  = 5 // skip checks until finalized tipset is past this
+	finalizedMinHeight  = 5  // skip checks until finalized tipset is past this
+	f3MinEpoch          = 10 // minimum chain head height on all nodes before F3 checks run
 )
+
+// allNodesPastEpoch returns true only if every node's chain head is at or above minEpoch.
+func allNodesPastEpoch(minEpoch abi.ChainEpoch) bool {
+	for _, name := range nodeKeys {
+		head, err := nodes[name].ChainHead(ctx)
+		if err != nil {
+			return false
+		}
+		if head.Height() < minEpoch {
+			return false
+		}
+	}
+	return true
+}
 
 func DoChainMonitor() {
 	subCheck := rngIntn(6)
@@ -163,6 +178,9 @@ func getFinalizedHeight() (abi.ChainEpoch, types.TipSetKey) {
 // doTipsetConsensus checks that all nodes agree on the tipset at a finalized height.
 func doTipsetConsensus() {
 	if len(nodeKeys) < 2 {
+		return
+	}
+	if !allNodesPastEpoch(f3MinEpoch) {
 		return
 	}
 
@@ -324,6 +342,9 @@ func doHeadComparison() {
 	if len(nodeKeys) < 2 {
 		return
 	}
+	if !allNodesPastEpoch(f3MinEpoch) {
+		return
+	}
 
 	type headInfo struct {
 		name   string
@@ -383,6 +404,9 @@ func doStateRootComparison() {
 	if len(nodeKeys) < 2 {
 		return
 	}
+	if !allNodesPastEpoch(f3MinEpoch) {
+		return
+	}
 
 	finalizedHeight, _ := getFinalizedHeight()
 	if finalizedHeight < finalizedMinHeight {
@@ -433,6 +457,9 @@ func doStateRootComparison() {
 // that would cause consensus splits (the Dec 2020 chain halt bug class).
 func doStateAudit() {
 	if len(nodeKeys) < 2 {
+		return
+	}
+	if !allNodesPastEpoch(f3MinEpoch) {
 		return
 	}
 
