@@ -86,7 +86,7 @@ func DoReorgChaos() {
 		postPeers, _ := victim.NetPeers(ctx)
 		isolated := len(postPeers) == 0
 
-		assert.Sometimes(isolated, "reorg_node_isolated", map[string]any{
+		assert.Sometimes(isolated, "Node successfully isolated for reorg test", map[string]any{
 			"victim":       victimName,
 			"victim_type":  nodeType(victimName),
 			"cycle":        cycle + 1,
@@ -128,7 +128,7 @@ func DoReorgChaos() {
 		return
 	}
 
-	assert.Sometimes(successfulCycles > 0, "reorg_chaos_executed", map[string]any{
+	assert.Sometimes(successfulCycles > 0, "Reorg chaos cycles completed", map[string]any{
 		"victim":    victimName,
 		"cycles":    successfulCycles,
 		"requested": numCycles,
@@ -210,7 +210,7 @@ func verifyPostReorgState(victimName string, cycles int) {
 		}
 		hasPeers := len(peers) > 0
 
-		assert.Always(hasPeers, "post_reorg_network_healed", map[string]any{
+		assert.Always(hasPeers, "Network connectivity restored after reorg", map[string]any{
 			"node":       name,
 			"node_type":  nodeType(name),
 			"victim":     victimName,
@@ -233,12 +233,14 @@ func verifyPostReorgState(victimName string, cycles int) {
 	checkHeight := abi.ChainEpoch(rngIntn(int(finalizedHeight)) + 1)
 
 	stateRoots := make(map[string][]string)
+	finalizedHeights := make(map[string]abi.ChainEpoch)
 	for _, name := range nodeKeys {
 		finTs, err := nodes[name].ChainGetFinalizedTipSet(ctx)
 		if err != nil {
 			log.Printf("[reorg-chaos] ChainGetFinalizedTipSet failed for %s: %v", name, err)
 			return
 		}
+		finalizedHeights[name] = finTs.Height()
 		ts, err := nodes[name].ChainGetTipSetByHeight(ctx, checkHeight, finTs.Key())
 		if err != nil {
 			log.Printf("[reorg-chaos] ChainGetTipSetByHeight(%d) failed for %s: %v", checkHeight, name, err)
@@ -250,7 +252,7 @@ func verifyPostReorgState(victimName string, cycles int) {
 
 	statesMatch := len(stateRoots) == 1
 
-	assert.Always(statesMatch, "post_reorg_state_consistent", map[string]any{
+	assert.Always(statesMatch, "Chain state is consistent after reorg", map[string]any{
 		"victim":        victimName,
 		"height":        checkHeight,
 		"finalized_at":  finalizedHeight,
@@ -259,22 +261,16 @@ func verifyPostReorgState(victimName string, cycles int) {
 		"cycles":        cycles,
 	})
 
-	// Check 3: Height spread — nodes shouldn't be too far apart after convergence
-	heights := make(map[string]abi.ChainEpoch)
-	for _, name := range nodeKeys {
-		head, err := nodes[name].ChainHead(ctx)
-		if err == nil {
-			heights[name] = head.Height()
-		}
-	}
-
-	if len(heights) < 2 {
+	// Check 3: Finalized height spread — nodes shouldn't be too far apart after convergence.
+	// Uses finalizedHeights collected above to avoid false positives from nodes legitimately
+	// lagging on live block processing (e.g. forest catching up after partition heal).
+	if len(finalizedHeights) < 2 {
 		return
 	}
 
 	var minH, maxH abi.ChainEpoch
 	first := true
-	for _, h := range heights {
+	for _, h := range finalizedHeights {
 		if first {
 			minH, maxH = h, h
 			first = false
@@ -290,9 +286,9 @@ func verifyPostReorgState(victimName string, cycles int) {
 	spread := maxH - minH
 	acceptable := spread <= 10
 
-	assert.Always(acceptable, "post_reorg_height_spread_ok", map[string]any{
+	assert.Always(acceptable, "Node heights within acceptable range after reorg", map[string]any{
 		"victim":  victimName,
-		"heights": heights,
+		"heights": finalizedHeights,
 		"spread":  spread,
 		"cycles":  cycles,
 	})
@@ -300,7 +296,7 @@ func verifyPostReorgState(victimName string, cycles int) {
 	// Liveness: full convergence achieved
 	converged := statesMatch && acceptable
 
-	assert.Sometimes(converged, "reorg_convergence_achieved", map[string]any{
+	assert.Sometimes(converged, "Nodes converged after reorg", map[string]any{
 		"victim":       victimName,
 		"cycles":       cycles,
 		"states_match": statesMatch,
@@ -312,6 +308,6 @@ func verifyPostReorgState(victimName string, cycles int) {
 			cycles, victimName, checkHeight, spread)
 	} else {
 		log.Printf("[reorg-chaos] DIVERGENCE after %d cycles: states_match=%v spread=%d heights=%v",
-			cycles, statesMatch, spread, heights)
+			cycles, statesMatch, spread, finalizedHeights)
 	}
 }
