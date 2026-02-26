@@ -39,7 +39,7 @@ func DoTransferMarket() {
 			fromAddr.String()[:12], toAddr.String()[:12], nodeName, amount.String())
 	}
 
-	assert.Sometimes(ok, "transfer_message_pushed", map[string]any{
+	assert.Sometimes(ok, "Transfer message accepted by mempool", map[string]any{
 		"from":   fromAddr.String(),
 		"to":     toAddr.String(),
 		"amount": amount.String(),
@@ -106,12 +106,12 @@ func DoGasWar() {
 	// Regardless of replacement success, nonce is consumed
 	nonces[fromAddr]++
 
-	assert.Sometimes(errA == nil, "gas_war_low_premium_accepted", map[string]any{
+	assert.Sometimes(errA == nil, "Low gas premium message accepted", map[string]any{
 		"node":  nodeName,
 		"nonce": currentNonce,
 	})
 
-	assert.Sometimes(errB == nil, "gas_war_replacement_accepted", map[string]any{
+	assert.Sometimes(errB == nil, "Gas replacement message accepted", map[string]any{
 		"node":         nodeName,
 		"nonce":        currentNonce,
 		"low_premium":  "100",
@@ -207,7 +207,7 @@ func doDoubleSpend() {
 	// Safety: at least one should eventually be accepted, but both being
 	// "accepted" into mempool is OK — only one should make it on-chain.
 	// The real assertion happens in DoChainMonitor checking state consistency.
-	assert.Sometimes(errA == nil || errB == nil, "double_spend_at_least_one_accepted", map[string]any{
+	assert.Sometimes(errA == nil || errB == nil, "At least one double-spend attempt accepted by mempool", map[string]any{
 		"from":   fromAddr.String(),
 		"nonce":  currentNonce,
 		"node_a": nodeA,
@@ -248,7 +248,7 @@ func doInvalidSignature() {
 	// The node MUST reject an invalid signature
 	rejected := err != nil
 
-	assert.Always(rejected, "invalid_signature_rejected", map[string]any{
+	assert.Always(rejected, "Message with invalid signature was rejected", map[string]any{
 		"node":     nodeName,
 		"from":     fromAddr.String(),
 		"rejected": rejected,
@@ -317,7 +317,7 @@ func doNonceRace() {
 
 	nonces[fromAddr]++
 
-	assert.Sometimes(errLow == nil || errHigh == nil, "nonce_race_at_least_one_accepted", map[string]any{
+	assert.Sometimes(errLow == nil || errHigh == nil, "At least one nonce race message accepted", map[string]any{
 		"from":    fromAddr.String(),
 		"nonce":   currentNonce,
 		"node_lo": nodeA,

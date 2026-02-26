@@ -228,7 +228,7 @@ func doDeployStressContract(ctype string) {
 
 	log.Printf("  [deploy] submitted %s deploy via %s (cid=%s)", ctype, nodeName, cidStr(msgCid))
 
-	assert.Sometimes(true, "contract_deploy_submitted", map[string]any{
+	assert.Sometimes(true, "EVM contract deployment submitted", map[string]any{
 		"type": ctype,
 		"node": nodeName,
 	})

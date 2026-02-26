@@ -70,7 +70,7 @@ func DoHeavyCompute() {
 
 		stateMatches := st.Root == checkTs.ParentState()
 
-		assert.Always(stateMatches, "state_computation_consistent", map[string]any{
+		assert.Always(stateMatches, "Recomputed state root matches stored state", map[string]any{
 			"node":           nodeName,
 			"node_type":      nodeType(nodeName),
 			"exec_height":    parentTs.Height(),
@@ -92,7 +92,7 @@ func DoHeavyCompute() {
 
 	debugLog("  [heavy-compute] OK: verified %d epochs on %s", epochsChecked, nodeName)
 
-	assert.Sometimes(epochsChecked > 0, "heavy_compute_verified", map[string]any{
+	assert.Sometimes(epochsChecked > 0, "Heavy computation path exercised", map[string]any{
 		"node":           nodeName,
 		"epochs_checked": epochsChecked,
 	})
@@ -241,7 +241,7 @@ func doTipsetConsensus() {
 
 	consensusReached := len(tipsetKeys) == 1 && errs == 0
 
-	assert.Always(consensusReached, "tipset_consensus", map[string]any{
+	assert.Always(consensusReached, "All nodes agree on the same finalized tipset", map[string]any{
 		"height":         checkHeight,
 		"finalized_at":   finalizedHeight,
 		"tipset_keys":    tipsetKeys,
@@ -250,7 +250,7 @@ func doTipsetConsensus() {
 		"errors":         errs,
 	})
 
-	assert.Sometimes(consensusReached, "tipset_consensus_verified", map[string]any{
+	assert.Sometimes(consensusReached, "Tipset consensus verified across nodes", map[string]any{
 		"height": checkHeight,
 	})
 }
@@ -260,12 +260,12 @@ func doTipsetConsensus() {
 func doHeightProgression() {
 	heights := make(map[string]abi.ChainEpoch)
 	for _, name := range nodeKeys {
-		head, err := nodes[name].ChainHead(ctx)
+		finTs, err := nodes[name].ChainGetFinalizedTipSet(ctx)
 		if err != nil {
-			log.Printf("[chain-monitor] ChainHead failed for %s: %v", name, err)
+			log.Printf("[chain-monitor] ChainGetFinalizedTipSet failed for %s: %v", name, err)
 			continue
 		}
-		heights[name] = head.Height()
+		heights[name] = finTs.Height()
 	}
 
 	if len(heights) == 0 {
@@ -298,7 +298,7 @@ func doHeightProgression() {
 	spread := maxH - minH
 	acceptable := spread <= 10
 
-	assert.Always(acceptable, "node_height_spread_acceptable", map[string]any{
+	assert.Sometimes(acceptable, "Node chain heights are within acceptable range", map[string]any{
 		"heights": heights,
 		"spread":  spread,
 		"min":     minH,
@@ -306,7 +306,7 @@ func doHeightProgression() {
 	})
 
 	// All nodes should be past genesis
-	assert.Sometimes(minH > 0, "all_nodes_past_genesis", map[string]any{
+	assert.Sometimes(minH > 0, "All nodes have advanced past genesis", map[string]any{
 		"min_height": minH,
 	})
 }
@@ -323,13 +323,13 @@ func doPeerCount() {
 
 		peerCount := len(peers)
 
-		assert.Always(peerCount > 0, "node_has_peers", map[string]any{
+		assert.Always(peerCount > 0, "Node has active peer connections", map[string]any{
 			"node":       name,
 			"node_type":  nodeType(name),
 			"peer_count": peerCount,
 		})
 
-		assert.Sometimes(peerCount > 0, "peer_connectivity_verified", map[string]any{
+		assert.Sometimes(peerCount > 0, "Peer connectivity confirmed", map[string]any{
 			"node":       name,
 			"peer_count": peerCount,
 		})
@@ -390,7 +390,7 @@ func doHeadComparison() {
 			}
 		}
 
-		assert.Always(allMatch, "same_height_same_tipset", map[string]any{
+		assert.Always(allMatch, "Nodes at the same height agree on the same tipset", map[string]any{
 			"height":     height,
 			"nodes":      len(group),
 			"keys_match": allMatch,
@@ -434,7 +434,7 @@ func doStateRootComparison() {
 
 	statesMatch := len(stateRoots) == 1
 
-	assert.Always(statesMatch, "cross_node_state_consistent", map[string]any{
+	assert.Always(statesMatch, "Chain state is consistent across all nodes", map[string]any{
 		"height":        checkHeight,
 		"finalized_at":  finalizedHeight,
 		"state_roots":   stateRoots,
@@ -444,7 +444,7 @@ func doStateRootComparison() {
 
 	if statesMatch {
 		debugLog("  [chain-monitor] OK: all %d nodes agree at height %d (finalized=%d)", len(nodeKeys), checkHeight, finalizedHeight)
-		assert.Sometimes(true, "shared_state_verified", map[string]any{
+		assert.Sometimes(true, "Shared chain state verified across nodes", map[string]any{
 			"height": checkHeight,
 		})
 	} else {
@@ -493,7 +493,7 @@ func doStateAudit() {
 
 	rootsMatch := len(stateRoots) == 1
 
-	assert.Always(rootsMatch, "state_root_post_fvm_consistent", map[string]any{
+	assert.Always(rootsMatch, "State root is consistent after FVM execution", map[string]any{
 		"height":        checkHeight,
 		"finalized_at":  finalizedHeight,
 		"unique_states": len(stateRoots),
@@ -529,7 +529,7 @@ func doStateAudit() {
 		}
 
 		msgsMatch := len(msgsA) == len(msgsB)
-		assert.Always(msgsMatch, "parent_messages_cross_node_match", map[string]any{
+		assert.Always(msgsMatch, "Parent messages match across nodes", map[string]any{
 			"height":  checkHeight,
 			"block":   blkCid.String()[:16],
 			"count_a": len(msgsA),
@@ -537,7 +537,7 @@ func doStateAudit() {
 		})
 
 		receiptsMatch := len(receiptsA) == len(receiptsB)
-		assert.Always(receiptsMatch, "parent_receipts_cross_node_match", map[string]any{
+		assert.Always(receiptsMatch, "Parent receipts match across nodes", map[string]any{
 			"height":  checkHeight,
 			"block":   blkCid.String()[:16],
 			"count_a": len(receiptsA),
@@ -545,7 +545,7 @@ func doStateAudit() {
 		})
 
 		msgReceiptMatch := len(msgsA) == len(receiptsA)
-		assert.Always(msgReceiptMatch, "message_receipt_count_match", map[string]any{
+		assert.Always(msgReceiptMatch, "Message and receipt counts match", map[string]any{
 			"height":   checkHeight,
 			"block":    blkCid.String()[:16],
 			"msgs":     len(msgsA),
@@ -560,7 +560,7 @@ func doStateAudit() {
 
 	debugLog("  [chain-monitor] OK: state-audit height %d, roots match, msgs/receipts consistent", checkHeight)
 
-	assert.Sometimes(true, "state_audit_verified", map[string]any{
+	assert.Sometimes(true, "State audit completed successfully", map[string]any{
 		"height": checkHeight,
 	})
 }
