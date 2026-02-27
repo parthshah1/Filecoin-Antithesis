@@ -9,3 +9,4 @@ workload/genesis-prep
 
 # Local env overrides
 *.env.local
+*.log

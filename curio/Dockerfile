@@ -87,4 +87,6 @@ RUN install -C curio /usr/local/bin/curio
 RUN install -C pdptool /usr/local/bin/pdptool
 RUN install -C sptool /usr/local/bin/sptool
 RUN curio fetch-params 2048
-ENTRYPOINT ["sleep", "infinity"] 
+COPY ./start_scripts/curio-init.sh /curio/curio-init.sh
+RUN chmod +x /curio/curio-init.sh
+ENTRYPOINT ["/curio/curio-init.sh"]
