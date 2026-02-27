@@ -82,6 +82,15 @@ bash /opt/filwizard/scripts/export-environment.sh \
 
 log_info "environment.env written to $ENV_OUTPUT"
 
+USDFC_ADDRESS=$(jq -r '.[] | select((.name | ascii_downcase) == "usdfc") | .address' \
+    "${WORKSPACE_PATH}/deployments.json" 2>/dev/null || true)
+if [ -n "$USDFC_ADDRESS" ]; then
+    echo "USDFC_ADDRESS=$USDFC_ADDRESS" >> "$ENV_OUTPUT"
+    log_info "USDFC_ADDRESS patched into environment.env: $USDFC_ADDRESS"
+else
+    log_warn "USDFC not found in deployments.json — USDFC_ADDRESS will be missing"
+fi
+
 # ── 5. Create Curio .env (subset with CURIO_ prefix) ──
 log_info "Creating Curio environment file..."
 mkdir -p "$CURIO_SHARED_DIR"
@@ -117,7 +126,9 @@ filwizard wallet create \
 
 CLIENT_PRIVATE_KEY=$(jq -r '.accounts.client.privateKey' "$ACCOUNTS_FILE")
 DEPLOYER_PRIVATE_KEY=$(jq -r '.accounts.deployer.privateKey' "$ACCOUNTS_FILE")
-
+echo "CLIENT_PRIVATE_KEY=$CLIENT_PRIVATE_KEY" >> "$ENV_OUTPUT"
+CLIENT_ETH_ADDRESS=$(jq -r '.accounts.client.ethAddress' "$ACCOUNTS_FILE")
+echo "CLIENT_ETH_ADDRESS=$CLIENT_ETH_ADDRESS" >> "$ENV_OUTPUT"
 # ── 7. Wait for Curio SP private key ──
 SP_PRIVATE_KEY_FILE="/shared/curio/private_key"
 wait_for_file "$SP_PRIVATE_KEY_FILE" "SP private key from Curio"

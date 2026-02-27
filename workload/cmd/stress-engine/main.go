@@ -57,6 +57,9 @@ var (
 	// Pending deploy CIDs for deferred verification
 	pendingDeploys []pendingDeploy
 	pendingMu      sync.Mutex
+
+	// FOC config — nil when the FOC compose profile is not active
+	focConfig *FOCConfig
 )
 
 type deployedContract struct {
@@ -260,6 +263,23 @@ func buildDeck() {
 		{"DoReorgChaos", "STRESS_WEIGHT_REORG", DoReorgChaos, 0},
 	}
 
+	// FOC vectors — auto-enabled when /shared/environment.env exists
+	if focConfig != nil {
+		log.Println("[init] FOC contracts detected, enabling FOC vectors")
+		actions = append(actions,
+			weightedAction{"DoFocMonitor", "STRESS_WEIGHT_FOC_MONITOR", DoFocMonitor, 3},
+			weightedAction{"DoFocTransferUSDFC", "STRESS_WEIGHT_FOC_TRANSFER", DoFocTransferUSDFC, 1},
+			weightedAction{"DoFocDeposit", "STRESS_WEIGHT_FOC_DEPOSIT", DoFocDeposit, 1},
+			weightedAction{"DoFocApproveOperator", "STRESS_WEIGHT_FOC_APPROVE_OP", DoFocApproveOperator, 1},
+			weightedAction{"DoFocDiscoverAndSettleRail", "STRESS_WEIGHT_FOC_SETTLE", DoFocDiscoverAndSettleRail, 1},
+			weightedAction{"DoFocWithdraw", "STRESS_WEIGHT_FOC_WITHDRAW", DoFocWithdraw, 1},
+			weightedAction{"DoFocCreateRail", "STRESS_WEIGHT_FOC_CREATE_RAIL", DoFocCreateRail, 1},
+			weightedAction{"DoFocModifyRailPayment", "STRESS_WEIGHT_FOC_MODIFY_RAIL", DoFocModifyRailPayment, 1},
+		)
+	} else {
+		log.Println("[init] No FOC environment found, FOC vectors disabled")
+	}
+
 	deck = nil
 	for _, a := range actions {
 		w := envInt(a.envVar, a.defWeight)
@@ -293,6 +313,7 @@ func main() {
 	waitForChain()
 	initNonces()
 	initContractBytecodes()
+	focConfig = parseFOCEnvironment()
 	buildDeck()
 
 	lifecycle.SetupComplete(map[string]any{

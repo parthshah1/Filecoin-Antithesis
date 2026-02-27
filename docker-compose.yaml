@@ -103,20 +103,53 @@ services:
       - STRESS_FOREST_RPC_PORT=3456
       - STRESS_KEYSTORE_PATH=/shared/configs/stress_keystore.json
       - STRESS_WAIT_HEIGHT=10
-      - STRESS_WEIGHT_TRANSFER=2
-      - STRESS_WEIGHT_GAS_WAR=1
-      - STRESS_WEIGHT_ADVERSARIAL=2
-      - STRESS_WEIGHT_HEAVY_COMPUTE=3
-      - STRESS_WEIGHT_CHAIN_MONITOR=6
-      - STRESS_WEIGHT_DEPLOY=1
-      - STRESS_WEIGHT_CONTRACT_CALL=1
-      - STRESS_WEIGHT_SELFDESTRUCT=1
-      - STRESS_WEIGHT_CONTRACT_RACE=1
-      - STRESS_WEIGHT_GAS_GUZZLER=2
-      - STRESS_WEIGHT_LOG_BLASTER=2
-      - STRESS_WEIGHT_MEMORY_BOMB=1
-      - STRESS_WEIGHT_STORAGE_SPAM=2
-      - STRESS_WEIGHT_REORG=3
+      # --- Action deck weights (0 = disabled, N = relative frequency in random draw) ---
+      # FIL transfers between wallets via the market actor
+      - STRESS_WEIGHT_TRANSFER=1
+      # Rapid-fire transactions from many wallets to spike mempool pressure
+      - STRESS_WEIGHT_GAS_WAR=0
+      # Concurrent conflicting messages from the same sender (double-spend attempts)
+      - STRESS_WEIGHT_ADVERSARIAL=0
+      # StateCompute re-execution and state root verification across nodes
+      - STRESS_WEIGHT_HEAVY_COMPUTE=0
+      # Cross-node tipset consensus, finality, and peer-connectivity checks
+      - STRESS_WEIGHT_CHAIN_MONITOR=0
+      # EVM contract deployment via EAM.CreateExternal
+      - STRESS_WEIGHT_DEPLOY=0
+      # Invoke already-deployed EVM contracts (recursive, delegatecall, simplecoin, etc.)
+      - STRESS_WEIGHT_CONTRACT_CALL=0
+      # Deploy a contract then immediately self-destruct it, stressing actor cleanup
+      - STRESS_WEIGHT_SELFDESTRUCT=0
+      # Two wallets call the same contract concurrently to race on shared state
+      - STRESS_WEIGHT_CONTRACT_RACE=0
+      # Tight keccak256 loop inside EVM to exhaust gas and stress the fee market
+      - STRESS_WEIGHT_GAS_GUZZLER=0
+      # Emit a large number of EVM events to stress receipt and log processing
+      - STRESS_WEIGHT_LOG_BLASTER=0
+      # Allocate maximum EVM memory to trigger quadratic memory expansion costs
+      - STRESS_WEIGHT_MEMORY_BOMB=0
+      # Write many unique storage slots to stress the state trie under load
+      - STRESS_WEIGHT_STORAGE_SPAM=0
+      # Disconnect/reconnect nodes to force chain reorgs and test convergence
+      - STRESS_WEIGHT_REORG=0
+      # FOC: read USDFC balances + SP registration via eth_call, assert payment invariants
+      - STRESS_WEIGHT_FOC_MONITOR=3
+      # FOC: ERC-20 USDFC transfer between client and deployer wallets
+      - STRESS_WEIGHT_FOC_TRANSFER=1
+      # FOC: approve FilecoinPay as spender + deposit USDFC into payment account
+      - STRESS_WEIGHT_FOC_DEPOSIT=1
+      # FOC: grant FWSS operator rights on the client's FilecoinPay account
+      - STRESS_WEIGHT_FOC_APPROVE_OP=1
+      # FOC: discover active payment rails and settle the first one found
+      - STRESS_WEIGHT_FOC_SETTLE=1
+      # FOC: withdraw available USDFC funds from FilecoinPay back to wallet
+      - STRESS_WEIGHT_FOC_WITHDRAW=1
+      # FOC adversarial: fire two concurrent settleRail calls for the same rail
+      - STRESS_WEIGHT_FOC_DBL_SETTLE=1
+      # FOC adversarial: run deposit and settle concurrently, check balance consistency
+      - STRESS_WEIGHT_FOC_CONCURRENT=1
+      # FOC adversarial: attempt zero-amount deposit, verify no state corruption
+      - STRESS_WEIGHT_FOC_BOUNDARY=1
       - STRESS_DEBUG=1
     volumes:
       - ./shared/configs:/shared/configs
