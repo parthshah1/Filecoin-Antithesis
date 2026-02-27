@@ -1,0 +1,145 @@
+name: On Versions Change
+
+# Triggered when versions.env is updated on main.
+# Builds all affected images at the specified commits and submits an ephemeral
+# Antithesis test to verify the new version combination.
+on:
+  push:
+    branches: [main]
+    paths: ['versions.env']
+
+jobs:
+  parse-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      lotus0_commit: ${{ steps.parse.outputs.lotus0_commit }}
+      lotus1_commit: ${{ steps.parse.outputs.lotus1_commit }}
+      forest_commit: ${{ steps.parse.outputs.forest_commit }}
+      curio_commit: ${{ steps.parse.outputs.curio_commit }}
+      drand_commit: ${{ steps.parse.outputs.drand_commit }}
+      workload_tag: ${{ steps.parse.outputs.workload_tag }}
+      filwizard_tag: ${{ steps.parse.outputs.filwizard_tag }}
+      config_tag: ${{ steps.parse.outputs.config_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse versions.env
+        id: parse
+        run: |
+          source versions.env
+          echo "lotus0_commit=$LOTUS0_COMMIT" >> $GITHUB_OUTPUT
+          echo "lotus1_commit=$LOTUS1_COMMIT" >> $GITHUB_OUTPUT
+          echo "forest_commit=$FOREST_COMMIT" >> $GITHUB_OUTPUT
+          echo "curio_commit=$CURIO_COMMIT" >> $GITHUB_OUTPUT
+          echo "drand_commit=$DRAND_COMMIT" >> $GITHUB_OUTPUT
+          echo "workload_tag=$WORKLOAD_TAG" >> $GITHUB_OUTPUT
+          echo "filwizard_tag=$FILWIZARD_TAG" >> $GITHUB_OUTPUT
+          echo "config_tag=$CONFIG_TAG" >> $GITHUB_OUTPUT
+
+  build-lotus0:
+    needs: parse-versions
+    uses: ./.github/workflows/build_push_lotus.yml
+    with:
+      lotus_tag: ${{ needs.parse-versions.outputs.lotus0_commit }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  # Only build a second lotus image when lotus0 and lotus1 pin different commits.
+  build-lotus1:
+    needs: parse-versions
+    if: ${{ needs.parse-versions.outputs.lotus1_commit != needs.parse-versions.outputs.lotus0_commit }}
+    uses: ./.github/workflows/build_push_lotus.yml
+    with:
+      lotus_tag: ${{ needs.parse-versions.outputs.lotus1_commit }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  build-forest:
+    needs: parse-versions
+    uses: ./.github/workflows/build_push_forest.yml
+    with:
+      forest_commit: ${{ needs.parse-versions.outputs.forest_commit }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  build-drand:
+    needs: parse-versions
+    uses: ./.github/workflows/build_push_drand.yml
+    with:
+      drand_tag: ${{ needs.parse-versions.outputs.drand_commit }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  build-workload:
+    needs: parse-versions
+    uses: ./.github/workflows/build_push_workload.yml
+    with:
+      workload_tag: ${{ needs.parse-versions.outputs.workload_tag }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  build-filwizard:
+    needs: parse-versions
+    uses: ./.github/workflows/build_push_filwizard.yml
+    with:
+      filwizard_tag: ${{ needs.parse-versions.outputs.filwizard_tag }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  # Curio depends on a specific lotus image, so it waits for lotus0 to be pushed.
+  build-curio:
+    needs: [parse-versions, build-lotus0]
+    uses: ./.github/workflows/build_push_curio.yml
+    with:
+      curio_tag: ${{ needs.parse-versions.outputs.curio_commit }}
+      lotus_tag: ${{ needs.parse-versions.outputs.lotus0_commit }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  # Config image bakes the resolved docker-compose.yaml (with exact version tags)
+  # into a scratch container that Antithesis reads to assemble the environment.
+  build-config:
+    needs: [parse-versions, build-lotus0, build-lotus1, build-forest, build-curio, build-drand, build-workload, build-filwizard]
+    if: ${{ !failure() && !cancelled() }}
+    uses: ./.github/workflows/build_push_config.yml
+    with:
+      config_tag: ${{ needs.parse-versions.outputs.config_tag }}
+    secrets:
+      ANTITHESIS_GAR_KEY: ${{ secrets.ANTITHESIS_GAR_KEY }}
+
+  run-test:
+    needs: [parse-versions, build-config]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build images list
+        id: images
+        run: |
+          LOTUS0=${{ needs.parse-versions.outputs.lotus0_commit }}
+          LOTUS1=${{ needs.parse-versions.outputs.lotus1_commit }}
+          FOREST=${{ needs.parse-versions.outputs.forest_commit }}
+          CURIO=${{ needs.parse-versions.outputs.curio_commit }}
+          DRAND=${{ needs.parse-versions.outputs.drand_commit }}
+          WORKLOAD=${{ needs.parse-versions.outputs.workload_tag }}
+          FILWIZARD=${{ needs.parse-versions.outputs.filwizard_tag }}
+
+          IMAGES="drand:${DRAND};forest:${FOREST};lotus:${LOTUS0}"
+          if [ "$LOTUS1" != "$LOTUS0" ]; then
+            IMAGES="${IMAGES};lotus:${LOTUS1}"
+          fi
+          IMAGES="${IMAGES};workload:${WORKLOAD};curio:${CURIO};filwizard:${FILWIZARD}"
+          echo "images=$IMAGES" >> $GITHUB_OUTPUT
+
+      - uses: antithesishq/antithesis-trigger-action@main
+        with:
+          notebook_name: filecoin
+          tenant: cobalt-bunny
+          username: filecoin
+          password: ${{ secrets.ANTITHESIS_PASSWORD }}
+          github_token: ${{ secrets.GH_PAT }}
+          images: ${{ steps.images.outputs.images }}
+          config_image: config:${{ needs.parse-versions.outputs.config_tag }}
+          description: "Versions change: ${{ github.event.head_commit.message }}"
+          additional_parameters: |-
+            custom.duration=1.5
+            antithesis.is_ephemeral=true

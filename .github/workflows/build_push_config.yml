@@ -8,6 +8,15 @@ on:
         required: true
         default: 'latest'
         description: A config tag
+  workflow_call:
+    inputs:
+      config_tag:
+        type: string
+        required: true
+        description: Tag to apply to the config image
+    secrets:
+      ANTITHESIS_GAR_KEY:
+        required: true
 
 jobs:
   antithesis:
@@ -37,6 +46,13 @@ jobs:
     # parameterize the extract and build stages. However, it would run both the
     # setup and teardown sections N times, once for each of the N containers we
     # are going to build and deploy.
+    - name: Resolve docker-compose.yaml image tags from versions.env
+      run: |
+        source versions.env
+        envsubst '$LOTUS0_COMMIT $LOTUS1_COMMIT $FOREST_COMMIT $CURIO_COMMIT $DRAND_COMMIT $WORKLOAD_TAG $FILWIZARD_TAG' \
+          < docker-compose.yaml > docker-compose.resolved.yaml
+        mv docker-compose.resolved.yaml docker-compose.yaml
+
     - name: Extract metadata (tags) for Docker config
       id: meta-config
       uses: docker/metadata-action@v5
@@ -44,7 +60,7 @@ jobs:
         images: us-central1-docker.pkg.dev/molten-verve-216720/filecoin-repository/config
         tags: |
           type=sha
-          ${{ inputs.config_tag }}
+          ${{ inputs.config_tag || 'latest' }}
     - name: Build and push config
       uses: docker/build-push-action@v5
       with:
