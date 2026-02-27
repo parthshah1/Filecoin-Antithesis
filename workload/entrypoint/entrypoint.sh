@@ -40,10 +40,15 @@ done
 
 # ── 4. Wait for filwizard if running (auto-detected via DNS) ──
 ENV_FILE="/shared/environment.env"
+FILWIZARD_READY="/shared/filwizard_ready"
 if getent hosts filwizard &>/dev/null; then
     log_info "Filwizard detected, waiting for environment.env..."
     while [ ! -f "$ENV_FILE" ] || [ ! -s "$ENV_FILE" ]; do sleep 2; done
     log_info "environment.env ready"
+
+    log_info "Waiting for filwizard SP registration to complete..."
+    while [ ! -f "$FILWIZARD_READY" ]; do sleep 2; done
+    log_info "Filwizard setup complete (SP registered)"
 
     # Source it (for any scripts that need vars)
     set -a

@@ -11,7 +11,6 @@ x-templates:
       - ./data/forest0:${FOREST_0_DATA_DIR}
       - ./shared/configs:${SHARED_CONFIGS}
       - ./data/curio:/var/lib/curio:rw
-      - ./curio/start_scripts/curio-init.sh:${CURIO_DATA_DIR}/curio-init.sh
     pull_policy: never
   needs_drand0_started: &needs_drand0_started
     depends_on:
@@ -199,7 +198,6 @@ services:
       - "12300:12300"
       - "4701:4701"
       - "32100:32100"
-    entrypoint: [ "${CURIO_DATA_DIR}/curio-init.sh" ]
     depends_on:
       lotus0:
         condition: service_healthy

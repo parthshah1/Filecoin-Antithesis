@@ -167,6 +167,7 @@ log_info "Service provider added to global whitelist (ready for dapps)"
 
 # ── 11. Signal healthy ──
 log_info "FilWizard setup complete. Signaling healthy."
+touch /shared/filwizard_ready
 touch /tmp/healthy
 
 # Keep container alive (compose healthcheck will gate dependents)

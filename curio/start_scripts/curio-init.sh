@@ -93,7 +93,7 @@ echo "  Multicall: $CURIO_DEVNET_MULTICALL_ADDRESS"
   curio cli --machine $myip:12300 storage attach --init --seal --store $CURIO_REPO_PATH
   
   echo "Stopping temporary Curio node..."
-  kill -15 $CURIO_PID || kill -9 $CURIO_PID
+  kill -9 $CURIO_PID
 
   touch $CURIO_REPO_PATH/.init.curio
 fi
@@ -159,7 +159,7 @@ if [ ! -f $CURIO_REPO_PATH/.init.pdp ]; then
 
   # Stop temporary Curio node
   echo "Stopping temporary Curio node..."
-  kill -15 $CURIO_PID || kill -9 $CURIO_PID
+  kill -9 $CURIO_PID
 
   touch $CURIO_REPO_PATH/.init.pdp
   echo "PDP service setup complete"
