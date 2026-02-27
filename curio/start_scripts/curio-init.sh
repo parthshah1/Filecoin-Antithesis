@@ -6,14 +6,14 @@ echo LOTUS_PATH=$LOTUS_PATH
 echo Wait for lotus is ready ...
 lotus wait-api
 head=0
-# Loop until the head is greater than 9
-while [[ $head -le 10 ]]; do
+# Loop until the head is greater than 5
+while [[ $head -le 5 ]]; do
     head=$(lotus chain list | awk '{print $1}' | awk -F':' '{print $1}' | tail -1)
-    if [[ $head -le 10 ]]; then
-        echo "Current head: $head, which is not greater than 10. Waiting..."
+    if [[ $head -le 5 ]]; then
+        echo "Current head: $head, which is not greater than 5. Waiting..."
         sleep 1  # Wait for 4 seconds before checking again
     else
-        echo "The head is now at 10: $head"
+        echo "The head is now at 5: $head"
     fi
 done
 
