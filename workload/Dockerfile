@@ -24,6 +24,8 @@ RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') \
     go build -o ./genesis-prep ./cmd/genesis-prep
 RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') \
     go build -o ./stress-engine ./cmd/stress-engine
+RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') \
+    go build -o ./protocol-fuzzer ./cmd/protocol-fuzzer
 
 RUN chmod +x ./entrypoint/entrypoint.sh
 

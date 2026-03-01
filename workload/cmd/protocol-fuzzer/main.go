@@ -1,0 +1,155 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/antithesishq/antithesis-sdk-go/lifecycle"
+)
+
+// ---------------------------------------------------------------------------
+// Global State (flat architecture — matches stress-engine pattern)
+// ---------------------------------------------------------------------------
+
+var (
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// Discovered libp2p targets
+	targets []TargetNode
+
+	// Network metadata
+	networkName string
+	genesisCID  string
+
+	// Identity pool for ephemeral libp2p hosts
+	pool *IdentityPool
+
+	// Weighted attack deck
+	deck []namedAttack
+)
+
+// namedAttack pairs an attack function with its name for logging.
+type namedAttack struct {
+	name string
+	fn   func()
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.Println("[fuzzer] protocol fuzzer starting")
+
+	if envOrDefault("FUZZER_ENABLED", "1") != "1" {
+		log.Println("[fuzzer] disabled via FUZZER_ENABLED=0, exiting")
+		return
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	// Parse node names from env (same var as stress-engine)
+	nodeNames := strings.Split(envOrDefault("STRESS_NODES", "lotus0"), ",")
+	devgenDir := envOrDefault("FUZZER_DEVGEN_DIR", "/root/devgen")
+
+	// Discover libp2p peers
+	log.Println("[fuzzer] discovering libp2p peers...")
+	targets = waitForNodes(nodeNames, devgenDir)
+	log.Printf("[fuzzer] discovered %d targets", len(targets))
+
+	// Load network name
+	networkName = loadNetworkName(devgenDir)
+
+	// Discover genesis CID via RPC
+	rpcPort := envOrDefault("STRESS_RPC_PORT", "1234")
+	rpcURL := fmt.Sprintf("http://lotus0:%s/rpc/v1", rpcPort)
+	genesisCID = discoverGenesisCID(rpcURL)
+
+	// Create identity pool
+	poolSize := envInt("FUZZER_IDENTITY_POOL_SIZE", 20)
+	pool = newIdentityPool(poolSize)
+	defer pool.CloseAll()
+
+	// Build weighted attack deck
+	buildDeck()
+
+	lifecycle.SetupComplete(map[string]any{
+		"targets":      len(targets),
+		"network_name": networkName,
+		"genesis_cid":  genesisCID,
+		"deck_size":    len(deck),
+	})
+
+	log.Println("[fuzzer] entering main loop")
+
+	// Main attack loop
+	interval := time.Duration(envInt("FUZZER_RATE_MS", 500)) * time.Millisecond
+	actionCounts := make(map[string]int)
+	iteration := 0
+
+	for {
+		attack := deck[rngIntn(len(deck))]
+		target := rngChoice(targets)
+
+		log.Printf("[ATTACK] starting vector=%s target=%s", attack.name, target.Name)
+		attack.fn()
+		log.Printf("[ATTACK] completed vector=%s target=%s", attack.name, target.Name)
+
+		actionCounts[attack.name]++
+		iteration++
+
+		// Periodic summary every 100 iterations
+		if iteration%100 == 0 {
+			log.Printf("[fuzzer] === iteration %d summary ===", iteration)
+			for name, count := range actionCounts {
+				log.Printf("[fuzzer]   %s: %d", name, count)
+			}
+		}
+
+		time.Sleep(interval)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Deck building (weighted, same pattern as stress-engine)
+// ---------------------------------------------------------------------------
+
+func buildDeck() {
+	type weightedCategory struct {
+		envVar    string
+		defWeight int
+		attacks   []namedAttack
+	}
+
+	categories := []weightedCategory{
+		{"FUZZER_WEIGHT_EXCHANGE_CLIENT", 3, getAllExchangeClientAttacks()},
+		{"FUZZER_WEIGHT_EXCHANGE_SERVER", 3, getAllExchangeServerAttacks()},
+		{"FUZZER_WEIGHT_HELLO", 3, getAllHelloAttacks()},
+		{"FUZZER_WEIGHT_GOSSIP", 0, getAllGossipAttacks()},
+		{"FUZZER_WEIGHT_BITSWAP", 0, getAllBitswapAttacks()},
+		{"FUZZER_WEIGHT_CHAOS", 0, getAllChaosAttacks()},
+	}
+
+	deck = nil
+	for _, cat := range categories {
+		w := envInt(cat.envVar, cat.defWeight)
+		if w <= 0 || len(cat.attacks) == 0 {
+			continue
+		}
+		log.Printf("[init] category %s: weight=%d attacks=%d", cat.envVar, w, len(cat.attacks))
+		for i := 0; i < w; i++ {
+			deck = append(deck, cat.attacks...)
+		}
+	}
+
+	if len(deck) == 0 {
+		log.Fatal("[init] FATAL: deck is empty — set at least one FUZZER_WEIGHT_* > 0")
+	}
+	log.Printf("[init] deck built with %d entries", len(deck))
+}

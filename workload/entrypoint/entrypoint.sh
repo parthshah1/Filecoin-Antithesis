@@ -64,6 +64,15 @@ if [ -f "/opt/antithesis/entrypoint/setup_complete.py" ]; then
     python3 -u /opt/antithesis/entrypoint/setup_complete.py
 fi
 
-# ── 6. Launch stress engine ──
+# ── 6. Launch stress engine + protocol fuzzer ──
 log_info "Launching stress engine..."
-exec /opt/antithesis/stress-engine
+/opt/antithesis/stress-engine &
+STRESS_PID=$!
+
+if [ "${FUZZER_ENABLED:-1}" = "1" ]; then
+    log_info "Launching protocol fuzzer..."
+    /opt/antithesis/protocol-fuzzer &
+    FUZZER_PID=$!
+fi
+
+wait -n $STRESS_PID ${FUZZER_PID:-}

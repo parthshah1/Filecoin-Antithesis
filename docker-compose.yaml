@@ -118,6 +118,17 @@ services:
       - STRESS_WEIGHT_STORAGE_SPAM=2
       - STRESS_WEIGHT_REORG=3
       - STRESS_DEBUG=1
+      # Protocol fuzzer config
+      - FUZZER_ENABLED=1
+      - FUZZER_RATE_MS=500
+      - FUZZER_DEBUG=1
+      - FUZZER_IDENTITY_POOL_SIZE=20
+      - FUZZER_WEIGHT_EXCHANGE_CLIENT=3
+      - FUZZER_WEIGHT_EXCHANGE_SERVER=3
+      - FUZZER_WEIGHT_HELLO=3
+      - FUZZER_WEIGHT_GOSSIP=0
+      - FUZZER_WEIGHT_BITSWAP=0
+      - FUZZER_WEIGHT_CHAOS=0
     volumes:
       - ./shared/configs:/shared/configs
       - ./shared:/shared
