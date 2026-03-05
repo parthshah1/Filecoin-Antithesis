@@ -95,7 +95,7 @@ services:
 
   workload:
     <<: [ *filecoin_service ]
-    image: workload:latest
+    image: workload:test
     container_name: workload
     environment:
       - STRESS_NODES=lotus0,lotus1,forest0
@@ -103,20 +103,63 @@ services:
       - STRESS_FOREST_RPC_PORT=3456
       - STRESS_KEYSTORE_PATH=/shared/configs/stress_keystore.json
       - STRESS_WAIT_HEIGHT=10
-      - STRESS_WEIGHT_TRANSFER=2
-      - STRESS_WEIGHT_GAS_WAR=1
-      - STRESS_WEIGHT_ADVERSARIAL=2
-      - STRESS_WEIGHT_HEAVY_COMPUTE=3
-      - STRESS_WEIGHT_CHAIN_MONITOR=6
-      - STRESS_WEIGHT_DEPLOY=1
-      - STRESS_WEIGHT_CONTRACT_CALL=1
-      - STRESS_WEIGHT_SELFDESTRUCT=1
-      - STRESS_WEIGHT_CONTRACT_RACE=1
-      - STRESS_WEIGHT_GAS_GUZZLER=2
-      - STRESS_WEIGHT_LOG_BLASTER=2
-      - STRESS_WEIGHT_MEMORY_BOMB=1
-      - STRESS_WEIGHT_STORAGE_SPAM=2
-      - STRESS_WEIGHT_REORG=3
+      # --- Action deck weights (0 = disabled, N = relative frequency in random draw) ---
+      # FIL transfers between wallets via the market actor
+      - STRESS_WEIGHT_TRANSFER=1
+      # Rapid-fire transactions from many wallets to spike mempool pressure
+      - STRESS_WEIGHT_GAS_WAR=0
+      # Concurrent conflicting messages from the same sender (double-spend attempts)
+      - STRESS_WEIGHT_ADVERSARIAL=0
+      # StateCompute re-execution and state root verification across nodes
+      - STRESS_WEIGHT_HEAVY_COMPUTE=0
+      # Cross-node tipset consensus, finality, and peer-connectivity checks
+      - STRESS_WEIGHT_CHAIN_MONITOR=0
+      # EVM contract deployment via EAM.CreateExternal
+      - STRESS_WEIGHT_DEPLOY=0
+      # Invoke already-deployed EVM contracts (recursive, delegatecall, simplecoin, etc.)
+      - STRESS_WEIGHT_CONTRACT_CALL=0
+      # Deploy a contract then immediately self-destruct it, stressing actor cleanup
+      - STRESS_WEIGHT_SELFDESTRUCT=0
+      # Two wallets call the same contract concurrently to race on shared state
+      - STRESS_WEIGHT_CONTRACT_RACE=0
+      # Tight keccak256 loop inside EVM to exhaust gas and stress the fee market
+      - STRESS_WEIGHT_GAS_GUZZLER=0
+      # Emit a large number of EVM events to stress receipt and log processing
+      - STRESS_WEIGHT_LOG_BLASTER=0
+      # Allocate maximum EVM memory to trigger quadratic memory expansion costs
+      - STRESS_WEIGHT_MEMORY_BOMB=0
+      # Write many unique storage slots to stress the state trie under load
+      - STRESS_WEIGHT_STORAGE_SPAM=0
+      # Disconnect/reconnect nodes to force chain reorgs and test convergence
+      - STRESS_WEIGHT_REORG=0
+      # Raw libp2p ChainExchange protocol stream with crafted malformed requests
+      - STRESS_WEIGHT_CHAIN_EXCHANGE=2
+      # SyncSubmitBlock with randomly nil'd pointer fields (Ticket, ElectionProof, etc.)
+      - STRESS_WEIGHT_NIL_TICKET=2
+      # SyncSubmitBlock with nil/empty slice fields (Parents, BeaconEntries, WinPoStProof)
+      - STRESS_WEIGHT_NIL_FIELD_BLOCK=2
+      # SyncSubmitBlock with extreme numeric values (Height, Timestamp, BaseFee, WinCount)
+      - STRESS_WEIGHT_BOUNDARY_EPOCH=2
+      # Recursive contract calls at FVM depth limit boundary, cross-node ExitCode comparison
+      - STRESS_WEIGHT_CALL_DEPTH=1
+      # Self-destruct then attempt resurrection via value transfer + invoke
+      - STRESS_WEIGHT_RESURRECT=1
+      # Messages to built-in actors (f00-f099) with wrong methods and garbage params
+      - STRESS_WEIGHT_MALFORMED_ACTOR=2
+      # Extreme gas field values (0, -1, MaxInt64) via StateCall and MpoolPush
+      - STRESS_WEIGHT_GAS_BOUNDARY=2
+      # Oversized / malformed CBOR params to stress deserialization and allocation
+      - STRESS_WEIGHT_OVERSIZED_PARAMS=1
+      # Non-zero Message.Version and MaxUint64 nonce
+      - STRESS_WEIGHT_VERSION_FUZZ=1
+      # Signature type mismatch (BLS type on secp, invalid type, truncated data)
+      - STRESS_WEIGHT_SIG_MISMATCH=2
+      # Messages to nonexistent f0/f2/f3/f4 addresses
+      - STRESS_WEIGHT_ADDR_CONFUSION=1
+      # Flood 50-200 messages then MpoolPending serialization
+      - STRESS_WEIGHT_MSG_FLOOD=1
+      # CBOR headers claiming huge lengths with minimal actual data
+      - STRESS_WEIGHT_CBOR_BOMB=1
       - STRESS_DEBUG=1
     volumes:
       - ./shared/configs:/shared/configs

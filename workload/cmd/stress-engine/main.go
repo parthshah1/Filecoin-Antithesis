@@ -263,6 +263,24 @@ func buildDeck() {
 		{"DoStorageSpam", "STRESS_WEIGHT_STORAGE_SPAM", DoStorageSpam, 0},
 		// Network chaos / reorg vectors
 		{"DoReorgChaos", "STRESS_WEIGHT_REORG", DoReorgChaos, 0},
+		// P0: Protocol-layer DoS
+		{"DoMalformedChainExchange", "STRESS_WEIGHT_CHAIN_EXCHANGE", DoMalformedChainExchange, 0},
+		// P0: Nil Ptr / Panic (block-level)
+		{"DoNilTicketBlock", "STRESS_WEIGHT_NIL_TICKET", DoNilTicketBlock, 0},
+		{"DoNilFieldBlock", "STRESS_WEIGHT_NIL_FIELD_BLOCK", DoNilFieldBlock, 0},
+		{"DoBoundaryEpochBlock", "STRESS_WEIGHT_BOUNDARY_EPOCH", DoBoundaryEpochBlock, 0},
+		// P1: FEVM/EVM cross-node
+		{"DoFVMCallDepthBomb", "STRESS_WEIGHT_CALL_DEPTH", DoFVMCallDepthBomb, 0},
+		{"DoSelfDestructResurrect", "STRESS_WEIGHT_RESURRECT", DoSelfDestructResurrect, 0},
+		// P1+: Message field fuzzing
+		{"DoMalformedActorMessage", "STRESS_WEIGHT_MALFORMED_ACTOR", DoMalformedActorMessage, 0},
+		{"DoGasBoundaryMessage", "STRESS_WEIGHT_GAS_BOUNDARY", DoGasBoundaryMessage, 0},
+		{"DoOversizedParams", "STRESS_WEIGHT_OVERSIZED_PARAMS", DoOversizedParams, 0},
+		{"DoVersionFieldFuzz", "STRESS_WEIGHT_VERSION_FUZZ", DoVersionFieldFuzz, 0},
+		{"DoSignatureTypeMismatch", "STRESS_WEIGHT_SIG_MISMATCH", DoSignatureTypeMismatch, 0},
+		{"DoAddressConfusion", "STRESS_WEIGHT_ADDR_CONFUSION", DoAddressConfusion, 0},
+		{"DoMessageBatchStress", "STRESS_WEIGHT_MSG_FLOOD", DoMessageBatchStress, 0},
+		{"DoCBORLengthBomb", "STRESS_WEIGHT_CBOR_BOMB", DoCBORLengthBomb, 0},
 	}
 
 	deck = nil
@@ -298,6 +316,7 @@ func main() {
 	waitForChain()
 	initNonces()
 	initContractBytecodes()
+	initAttackHost()
 	buildDeck()
 
 	lifecycle.SetupComplete(map[string]any{
