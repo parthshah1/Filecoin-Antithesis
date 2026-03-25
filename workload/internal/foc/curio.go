@@ -51,6 +51,7 @@ type PieceAdditionStatus struct {
 	DataSetID         int    `json:"dataSetId"`
 	PieceCount        int    `json:"pieceCount"`
 	AddMessageOK      *bool  `json:"addMessageOk"`
+	PiecesAdded       bool   `json:"piecesAdded"`
 	ConfirmedPieceIDs []int  `json:"confirmedPieceIds,omitempty"`
 }
 
@@ -362,7 +363,7 @@ func WaitForPieceAddition(ctx context.Context, dataSetID int, txHash string) ([]
 		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 			return false, err
 		}
-		if status.AddMessageOK != nil && *status.AddMessageOK {
+		if status.AddMessageOK != nil && *status.AddMessageOK && status.PiecesAdded {
 			pieceIDs = status.ConfirmedPieceIDs
 			return true, nil
 		}
@@ -422,6 +423,42 @@ func DownloadPiece(ctx context.Context, pieceCID string) ([]byte, error) {
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// DeletePieceHTTP deletes a piece from a dataset via Curio's HTTP API.
+// Uses DELETE /pdp/data-sets/{dataSetID}/pieces/{pieceID} with optional extraData.
+func DeletePieceHTTP(ctx context.Context, dataSetID int, pieceID int, extraData string) error {
+	reqURL := fmt.Sprintf("%s/pdp/data-sets/%d/pieces/%d", CurioBaseURL(), dataSetID, pieceID)
+
+	var body io.Reader
+	if extraData != "" {
+		bodyBytes, err := json.Marshal(map[string]string{"extraData": extraData})
+		if err != nil {
+			return fmt.Errorf("marshal: %w", err)
+		}
+		body = bytes.NewReader(bodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, body)
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := curioHTTPClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("delete piece: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete piece: status %d: %s", resp.StatusCode, respBody)
+	}
+
+	return nil
 }
 
 // poll retries fn at interval until it returns true, timeout, or error.

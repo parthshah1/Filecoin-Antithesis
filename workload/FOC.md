@@ -41,11 +41,12 @@ workload/
 │   ├── stress-engine/          # Main fuzz driver
 │   │   ├── main.go             # Init, deck building, main loop
 │   │   ├── foc_vectors.go      # FOC lifecycle + steady-state vectors
+│   │   ├── griefing_vectors.go # Adversarial economic security probes
 │   │   ├── actions.go          # Non-FOC stress vectors (transfers, contracts, etc.)
 │   │   └── contracts.go        # Embedded EVM bytecodes
 │   ├── foc-sidecar/            # Independent safety monitor
 │   │   ├── main.go             # Polling loop
-│   │   ├── assertions.go       # 5 safety assertions (assert.Always)
+│   │   ├── assertions.go       # 8 safety assertions (assert.Always + assert.Sometimes)
 │   │   ├── events.go           # Event log parsing (DataSetCreated, RailCreated, etc.)
 │   │   └── state.go            # Thread-safe state tracking
 │   └── genesis-prep/           # Wallet generation (runs before stress-engine)
@@ -53,7 +54,7 @@ workload/
 └── internal/
     └── foc/                    # Shared FOC library
         ├── config.go           # Parse /shared/environment.env + SP key
-        ├── eth.go              # EVM tx submission (SendEthTx, SendEthTxConfirmed, BuildCalldata)
+        ├── eth.go              # EVM tx submission (SendEthTx, SendEthTxConfirmed, SendEthTxConfirmedWithValue, BuildCalldata)
         ├── eip712.go           # EIP-712 typed data signing for FWSS
         ├── curio.go            # Curio PDP HTTP API client (upload, create dataset, add pieces)
         ├── commp.go            # PieceCIDv2 calculation (CommP)
@@ -152,15 +153,53 @@ Reads available funds from FilecoinPay, withdraws 1–5% of available balance ba
 ### DoFOCRetrieveAndVerify (weight: 1)
 Downloads a random piece from Curio's PDP API (`GET /piece/{cid}`), recomputes PieceCIDv2 via CommP, and verifies the CID matches the original upload. Detects data corruption in the storage/retrieval pipeline.
 
-### DoFOCDeletePiece (weight: 0, opt-in)
-Signs EIP-712 `SchedulePieceRemovals` and submits to PDPVerifier. Removes the last added piece from the proofset. **Destructive** — disabled by default.
+### DoFOCDeletePiece (weight: 1)
+Signs EIP-712 `SchedulePieceRemovals` and submits to PDPVerifier via `SendEthTxConfirmed`. Uses confirmed tx submission (returns piece on failure). Post-deletion assertions:
+- Reads `getActivePieceCount` before and after → `assert.Sometimes(countAfter <= countBefore)`
+- Tries `DownloadPiece` after deletion → `assert.Sometimes(err != nil, "deleted piece becomes unretrievable")`
+- Tracks deleted pieces in `focState.DeletedPieces` for later retrieval checks.
 
-### DoFOCDeleteDataSet (weight: 0, opt-in)
+Only deletes pieces with confirmed on-chain IDs (pieces without IDs are skipped to avoid contract reverts).
+
+### DoFOCDeleteDataSet (weight: 1)
 Two-phase dataset deletion following the FWSS termination pipeline:
-1. **Phase 1**: Calls `FWSS.terminateService(clientDataSetId)` to initiate service termination (sets end epoch on the payment rail).
-2. **Phase 2** (subsequent invocation): Signs EIP-712 `DeleteDataSet` and submits to `PDPVerifier.deleteDataSet()`. Only succeeds after the termination epoch has passed.
+1. **Phase 1**: Snapshots pre-termination state (funds, lockup, piece count). Calls `FWSS.terminateService(onChainDataSetID)` to initiate service termination.
+2. **Phase 2** (subsequent invocation): Verifies dataset remains live during termination window. Signs EIP-712 `DeleteDataSet` and submits to `PDPVerifier.deleteDataSet()`. Only succeeds after the termination epoch has passed.
 
-Resets the lifecycle to `Init` on success. **Destructive** — disabled by default.
+Post-deletion assertions:
+- `assert.Sometimes(!liveAfter, "dataset not live after deletion")`
+- `assert.Sometimes(piecesAfter == 0, "piece count zero after dataset deletion")`
+- `assert.Sometimes(lockupAfter < lockupBefore, "lockup released after dataset deletion")`
+- Tries retrieving a previously-added piece → `assert.Sometimes(err != nil, "pieces unretrievable after dataset deletion")`
+
+Resets the lifecycle to `Init` on success.
+
+---
+
+## Adversarial Griefing Vectors (`griefing_vectors.go`)
+
+A dedicated secondary client wallet with 0.5 USDFC acts as an attacker, isolated from the FOC lifecycle to avoid false positives. The wallet is removed from the general stress wallet pool on init. All griefing probes use `assert.Sometimes` to tolerate fault injection.
+
+### Griefing Lifecycle
+
+```
+Init → Funded → ActorCreated → Approved → Deposited → OperatorApproved → Armed
+```
+
+The secondary client is funded with 0.5 USDFC from the FOC primary client, gets an f4 actor created via 1 FIL EVM transfer, then approves FPV1 and FWSS as operator. Once Armed, probes fire randomly via `doGriefDispatch()`.
+
+### Active Probes
+
+| Probe | Persona | What It Does |
+|-------|---------|-------------|
+| **EmptyDatasetFee** | Deadbeat client | Creates empty datasets via Curio HTTP, checks if USDFC sybil fee is deducted. Regression for the sybil fee drain PoC. |
+| **InsolvencyCreation** | Deadbeat client | Drains all USDFC from FPV1, attempts dataset creation with $0 balance. Verifies contract rejects insolvent clients. Re-funds afterwards. |
+| **CrossPayerReplay** | Replay attacker | Signs EIP-712 with attacker key but encodes victim as payer in extraData. Verifies signature binding prevents cross-payer forgery. |
+| **BurstCreation** | Spammer | Fires 3-5 dataset creation requests in rapid succession. Tests rate limiting and fee correctness under load. |
+| **SettlementMonotonicity** | Economic invariant | Settles FOC primary rail, verifies `settledUpTo` advances monotonically and doesn't overshoot. |
+| **TerminationEndEpoch** | Economic invariant | During termination window, verifies `endEpoch` is set and immutable (FilecoinPay safety hatch). |
+| **UnauthorizedTermination** | Authorization | Attacker attempts `terminateService` on primary dataset. Verifies only payer/SP can terminate. |
+| **LockupInvariant** | Economic invariant | Checks `funds >= lockupCurrent` for FOC primary client. The fundamental FilecoinPay safety property. |
 
 ---
 
@@ -186,10 +225,33 @@ All stress-engine assertions use `assert.Sometimes` because individual transacti
 | `"USDFC transfer succeeds"` | Sometimes | DoFOCTransfer | ERC-20 transfer tx accepted by mempool |
 | `"payment rail settlement succeeds"` | Sometimes | DoFOCSettle | `settleRail(railId, epoch)` tx accepted by mempool |
 | `"USDFC withdrawal from FilecoinPay succeeds"` | Sometimes | DoFOCWithdraw | `withdraw(USDFC, amount)` tx accepted by mempool |
-| `"piece deletion scheduled"` | Sometimes | DoFOCDeletePiece | `schedulePieceDeletions` tx accepted by mempool |
-| `"FWSS service termination initiated"` | Sometimes | DoFOCDeleteDataSet | `terminateService(clientDataSetId)` confirmed on-chain (phase 1) |
-| `"dataset deletion succeeds"` | Sometimes | DoFOCDeleteDataSet | `deleteDataSet` confirmed on-chain after termination epoch passed (phase 2) |
-| `"piece retrieval integrity verified"` | Sometimes | DoFOCRetrieveAndVerify | Downloaded piece recomputed CID matches original. Detects data corruption in storage/retrieval. |
+| `"piece deletion scheduled"` | Sometimes | DoFOCDeletePiece | `schedulePieceDeletions` tx confirmed on-chain |
+| `"piece count does not increase after deletion"` | Sometimes | DoFOCDeletePiece | `getActivePieceCount` doesn't grow after deletion |
+| `"deleted piece becomes unretrievable"` | Sometimes | DoFOCDeletePiece | `DownloadPiece` fails for deleted piece |
+| `"FWSS service termination initiated"` | Sometimes | DoFOCDeleteDataSet | `terminateService(onChainDataSetID)` confirmed on-chain (phase 1) |
+| `"dataset remains live during termination window"` | Sometimes | DoFOCDeleteDataSet | `dataSetLive == true` between termination and deletion |
+| `"dataset deletion succeeds"` | Sometimes | DoFOCDeleteDataSet | `deleteDataSet` confirmed on-chain after termination epoch (phase 2) |
+| `"dataset not live after deletion"` | Sometimes | DoFOCDeleteDataSet | `dataSetLive == false` after deletion |
+| `"piece count zero after dataset deletion"` | Sometimes | DoFOCDeleteDataSet | `getActivePieceCount == 0` after deletion |
+| `"lockup released after dataset deletion"` | Sometimes | DoFOCDeleteDataSet | Client lockup decreases after rails terminated |
+| `"pieces unretrievable after dataset deletion"` | Sometimes | DoFOCDeleteDataSet | `DownloadPiece` fails for previously-added pieces |
+| `"piece retrieval integrity verified"` | Sometimes | DoFOCRetrieveAndVerify | Downloaded piece recomputed CID matches original |
+
+### Griefing Assertions (`griefing_vectors.go`)
+
+| Assertion Message | Type | Probe | What It Validates |
+|-------------------|------|-------|-------------------|
+| `"dataset creation fee deducted from client USDFC"` | Sometimes | EmptyDatasetFee | FWSS burn rail extracts sybil fee. Regression for PoC vulnerability. |
+| `"insolvent client dataset creation rejected"` | Sometimes | InsolvencyCreation | Contract rejects dataset creation with zero available funds |
+| `"cross-payer signature replay rejected"` | Sometimes | CrossPayerReplay | EIP-712 signature binding prevents charging a different payer |
+| `"burst dataset creation accepted without rate limiting"` | Sometimes | BurstCreation | Documents whether rate limiting exists |
+| `"burst creation charges fees correctly"` | Sometimes | BurstCreation | Fees deducted for accepted burst requests |
+| `"settledUpTo advances monotonically"` | Sometimes | SettlementMonotonicity | Settlement never goes backward (#417/#416 regression) |
+| `"settledUpTo does not overshoot requested epoch"` | Sometimes | SettlementMonotonicity | Settlement doesn't pay for future epochs |
+| `"endEpoch set after termination"` | Sometimes | TerminationEndEpoch | FilecoinPay safety hatch activated |
+| `"endEpoch immutable post-termination"` | Sometimes | TerminationEndEpoch | Safety hatch cannot be corrupted |
+| `"unauthorized termination rejected"` | Sometimes | UnauthorizedTermination | Only payer/SP can terminate |
+| `"funds >= lockup invariant holds"` | Sometimes | LockupInvariant | Fundamental FilecoinPay safety property |
 
 ### Sidecar Assertions (`assertions.go`)
 
@@ -198,7 +260,7 @@ Sidecar assertions use `assert.Always` for safety invariants that must hold on e
 | Assertion Message | Type | Function | What It Validates |
 |-------------------|------|----------|-------------------|
 | `"Rail-to-dataset reverse mapping is consistent"` | Always | checkRailToDataset | `railToDataSet(pdpRailId)` returns the expected `dataSetId` for every tracked dataset. Detects rail/dataset mapping corruption. |
-| `"FilecoinPay holds sufficient USDFC (solvency)"` | Always | checkFilecoinPaySolvency | `balanceOf(FilecoinPay)` >= sum of all tracked `accounts.funds + accounts.lockup`. Detects insolvency / phantom balance creation. |
+| `"FilecoinPay holds sufficient USDFC (solvency)"` | Always | checkFilecoinPaySolvency | `balanceOf(FilecoinPay)` >= sum of all tracked `accounts.funds`. (Note: `lockupCurrent` is a subset of `funds`, not additive — summing both would double-count.) |
 | `"Provider ID matches registry for dataset"` | Always | checkProviderIDConsistency | `addressToProviderId(sp)` matches the `providerId` from the `DataSetCreated` event. Detects registry corruption or SP impersonation. |
 | `"Active proofset is live on-chain"` | Always | checkProofSetLiveness | Every non-deleted dataset has `dataSetLive() == true`. Detects unexpected dataset termination or proof failure. |
 | `"Deleted proofset is not live"` | Always | checkDeletedDataSetNotLive | Every deleted dataset has `dataSetLive() == false`. Detects zombie datasets that survive deletion. |
@@ -231,10 +293,22 @@ foc.SendEthTx(ctx, node, privKey, toAddr, calldata, "tag")
 // Wait for receipt, return true only on status=1
 foc.SendEthTxConfirmed(ctx, node, privKey, toAddr, calldata, "tag")
 
+// Send with FIL value (creates f4 actors)
+foc.SendEthTxConfirmedWithValue(ctx, node, privKey, toAddr, value, "tag")
+
 // Read-only calls
 foc.EthCallUint256(ctx, node, to, calldata)  // decode uint256
 foc.EthCallBool(ctx, node, to, calldata)     // decode bool
 foc.EthCallRaw(ctx, node, to, calldata)      // raw bytes
+
+// Rail state readers (from getRail 12-field tuple)
+foc.ReadRailPaymentRate(ctx, node, filPayAddr, railID)  // word 5
+foc.ReadRailSettledUpTo(ctx, node, filPayAddr, railID)  // word 8
+foc.ReadRailEndEpoch(ctx, node, filPayAddr, railID)     // word 9
+
+// Account state readers
+foc.ReadAccountFunds(ctx, node, filPayAddr, tokenAddr, ownerAddr)
+foc.ReadAccountLockup(ctx, node, filPayAddr, tokenAddr, ownerAddr)
 ```
 
 All transactions use:
@@ -318,8 +392,9 @@ When the FOC profile is active, non-FOC stress vectors (EVM contracts, nonce cha
 | `STRESS_WEIGHT_FOC_TRANSFER` | `2` | Steady-state | ERC-20 USDFC transfer (client → deployer) |
 | `STRESS_WEIGHT_FOC_SETTLE` | `2` | Steady-state | Settle active payment rail |
 | `STRESS_WEIGHT_FOC_WITHDRAW` | `2` | Steady-state | Withdraw USDFC from FilecoinPay |
-| `STRESS_WEIGHT_FOC_DELETE_PIECE` | `1` | Destructive | Schedule piece deletion from proofset |
-| `STRESS_WEIGHT_FOC_DELETE_DS` | `0` | Destructive | Delete entire dataset + reset lifecycle |
+| `STRESS_WEIGHT_FOC_DELETE_PIECE` | `1` | Destructive | Schedule piece deletion with post-deletion assertions |
+| `STRESS_WEIGHT_FOC_DELETE_DS` | `1` | Destructive | Terminate + delete dataset with pre/post assertions |
+| `STRESS_WEIGHT_PDP_GRIEFING` | `8` | Adversarial | Economic security probes (fee extraction, insolvency, replay, invariants) |
 
 ---
 
@@ -331,7 +406,15 @@ When the FOC profile is active, non-FOC stress vectors (EVM contracts, nonce cha
 docker compose --profile foc up -d
 ```
 
-This starts: drand (3 nodes), lotus (2 nodes), forest (1 node), filwizard, yugabyte, curio, and workload.
+This starts: drand (3 nodes), lotus (2 nodes), lotus-miner (2 miners), filwizard, yugabyte, curio, and workload.
+
+### Start full non-FOC devnet
+
+```bash
+docker compose --profile full up -d
+```
+
+This starts: drand (3 nodes), lotus (4 nodes), lotus-miner (4 miners), forest (1 node), and workload. FOC services are excluded.
 
 ### Monitor logs
 
@@ -342,14 +425,20 @@ docker logs workload 2>&1 | grep '\[foc-lifecycle\]'
 # Piece uploads and additions
 docker logs workload 2>&1 | grep '\[foc-upload\]\|\[foc-add-pieces\]'
 
+# Deletion and termination
+docker logs workload 2>&1 | grep '\[foc-delete-piece\]\|\[foc-delete-ds\]'
+
+# Griefing probes
+docker logs workload 2>&1 | grep '\[pdp-griefing\]\|dispatching'
+
 # Sidecar assertions
 docker logs workload 2>&1 | grep '\[foc-sidecar\]'
 
 # Safety violations (should never appear)
-docker logs workload 2>&1 | grep 'VIOLATION'
+docker logs workload 2>&1 | grep 'VIOLATION\|CRITICAL'
 
 # Overall progress summary
-docker logs workload 2>&1 | grep '\[foc-progress\]'
+docker logs workload 2>&1 | grep '\[foc-progress\]\|\[pdp-griefing\].*state='
 ```
 
 ### Build workload binary locally
@@ -383,8 +472,11 @@ go vet ./...
 
 ## Future Work
 
-- **SP-to-SP piece pull (`/pull` flow)** — Curio supports `POST /pdp/piece/pull` for one SP to pull data from another, which is the core multi-copy/durability mechanism. Testing this requires a second Curio node (with its own Yugabyte, SP registration, and PDP wallet). Planned for when multi-Curio devnet support is added.
+
+- **Settlement drain attack** — Client withdraws USDFC right before settlement epoch, SP's settle tx reverts.
+- **Terminate-then-settle flow** — After termination, verify SP can still settle via the safety hatch (endEpoch window). Verify `settleTerminatedRailWithoutValidation` bypass works after endEpoch.
+- **SP-to-SP piece pull (`/pull` flow)** — Curio supports `POST /pdp/piece/pull` for one SP to pull data from another. Requires a second Curio node.
 - **`depositWithPermitAndApproveOperator`** — Combined deposit + operator approval in a single tx (the production flow). Requires EIP-2612 permit support in MockUSDFC.
 - **Session key testing** — `SessionKeyRegistry` enables delegated signing. Not yet exercised.
-- **Larger piece sizes (40+ MiB)** — Curio caches proof data above ~40 MiB, exercising different code paths. Currently limited to keep devnet test cycles fast.
-- **`addPieces` with `dataSetId=0`** — Production flow creates datasets along with the first piece. The separate `createDataSet` path may be removed upstream.
+- **Larger piece sizes (40+ MiB)** — Curio caches proof data above ~40 MiB, exercising different code paths.
+- **`addPieces` with `dataSetId=0`** — Production flow creates datasets along with the first piece. Combo EIP-712 signatures (filecoin-services#442) for this flow.

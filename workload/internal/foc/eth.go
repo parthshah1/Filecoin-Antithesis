@@ -390,6 +390,37 @@ func ReadRailPaymentRate(ctx context.Context, node api.FullNode, filPayAddr []by
 	return new(big.Int).SetBytes(result[160:192])
 }
 
+// ReadRailSettledUpTo calls getRail(railId) and returns the settledUpTo field.
+// getRail returns a 12-field tuple; settledUpTo is at word index 8 (bytes 256-287).
+func ReadRailSettledUpTo(ctx context.Context, node api.FullNode, filPayAddr []byte, railID uint64) *big.Int {
+	calldata := BuildCalldata(SigGetRail, EncodeBigInt(new(big.Int).SetUint64(railID)))
+	result, err := EthCallRaw(ctx, node, filPayAddr, calldata)
+	if err != nil {
+		log.Printf("[foc] ReadRailSettledUpTo(%d) failed: %v", railID, err)
+		return nil
+	}
+	if len(result) < 288 { // need at least 9 words
+		return nil
+	}
+	return new(big.Int).SetBytes(result[256:288])
+}
+
+// ReadRailEndEpoch calls getRail(railId) and returns the endEpoch field.
+// getRail returns a 12-field tuple; endEpoch is at word index 9 (bytes 288-319).
+// Returns 0 for active (non-terminated) rails.
+func ReadRailEndEpoch(ctx context.Context, node api.FullNode, filPayAddr []byte, railID uint64) *big.Int {
+	calldata := BuildCalldata(SigGetRail, EncodeBigInt(new(big.Int).SetUint64(railID)))
+	result, err := EthCallRaw(ctx, node, filPayAddr, calldata)
+	if err != nil {
+		log.Printf("[foc] ReadRailEndEpoch(%d) failed: %v", railID, err)
+		return nil
+	}
+	if len(result) < 320 { // need at least 10 words
+		return nil
+	}
+	return new(big.Int).SetBytes(result[288:320])
+}
+
 // EncodeBigInt ABI-encodes a *big.Int as a 32-byte big-endian uint256.
 func EncodeBigInt(n *big.Int) []byte {
 	buf := make([]byte, 32)

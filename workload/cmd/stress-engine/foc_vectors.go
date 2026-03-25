@@ -646,19 +646,16 @@ func DoFOCWithdraw() {
 	})
 }
 
-// DoFOCDeletePiece schedules deletion of a piece from the proofset and verifies
+// DoFOCDeletePiece deletes a piece via Curio's HTTP DELETE endpoint and verifies
 // the deletion affected piece count. The piece is tracked in DeletedPieces for
 // later retrieval verification.
 func DoFOCDeletePiece() {
-	if focCfg == nil || focCfg.ClientKey == nil ||
-		focCfg.FWSSAddr == nil || focCfg.PDPAddr == nil {
+	if focCfg == nil || focCfg.ClientKey == nil || focCfg.PDPAddr == nil {
 		return
 	}
-	if focCfg.SPKey == nil {
-		focCfg.ReloadSPKey()
-		if focCfg.SPKey == nil {
-			return
-		}
+
+	if !foc.PingCurio(ctx) {
+		return
 	}
 
 	focStateMu.Lock()
@@ -683,6 +680,7 @@ func DoFOCDeletePiece() {
 	countBefore, _ := foc.EthCallUint256(ctx, node, focCfg.PDPAddr,
 		foc.BuildCalldata(foc.SigGetActivePieceCount, dsIDBytes))
 
+	// Sign EIP-712 for the deletion extraData (FWSS requires client signature)
 	pieceIDBig := big.NewInt(int64(piece.PieceID))
 	sig, err := foc.SignEIP712SchedulePieceRemovals(
 		focCfg.ClientKey, focCfg.FWSSAddr,
@@ -694,19 +692,13 @@ func DoFOCDeletePiece() {
 		return
 	}
 
-	extraData := encodeBytes(sig)
-	calldata := foc.BuildCalldata(foc.SigSchedulePieceDeletions,
-		foc.EncodeBigInt(big.NewInt(int64(dsID))),
-		foc.EncodeBigInt(big.NewInt(96)),
-		foc.EncodeBigInt(big.NewInt(160)),
-		foc.EncodeBigInt(big.NewInt(1)),
-		foc.EncodeBigInt(pieceIDBig),
-		extraData,
-	)
+	extraData := hex.EncodeToString(encodeBytes(sig))
 
-	ok := foc.SendEthTxConfirmed(ctx, node, focCfg.SPKey, focCfg.PDPAddr, calldata, "foc-delete-piece")
-	if !ok {
-		log.Printf("[foc-delete-piece] deletion tx failed, returning piece")
+	// Delete via Curio HTTP API — Curio handles the on-chain tx
+	log.Printf("[foc-delete-piece] deleting piece %d via Curio HTTP", piece.PieceID)
+	err = foc.DeletePieceHTTP(ctx, dsID, piece.PieceID, extraData)
+	if err != nil {
+		log.Printf("[foc-delete-piece] HTTP delete failed: %v", err)
 		returnPiece(piece)
 		return
 	}
@@ -737,7 +729,7 @@ func DoFOCDeletePiece() {
 	log.Printf("[foc-delete-piece] pieceID=%d cid=%s countBefore=%v countAfter=%v retrievable=%v",
 		piece.PieceID, piece.PieceCID, countBefore, countAfter, retrieveErr == nil)
 
-	assert.Sometimes(ok, "piece deletion scheduled", map[string]any{
+	assert.Sometimes(true, "piece deletion scheduled via Curio HTTP", map[string]any{
 		"pieceID":  piece.PieceID,
 		"pieceCID": piece.PieceCID,
 	})
@@ -785,13 +777,30 @@ func DoFOCDeleteDataSet() {
 		preTermPieces, _ := foc.EthCallUint256(ctx, node, focCfg.PDPAddr,
 			foc.BuildCalldata(foc.SigGetActivePieceCount, dsIDBytes))
 
+		// Settle the rail first — terminateRail's modifier requires funds >= lockupCurrent
+		// after settlement. If withdrawals drained funds while lockup accumulated,
+		// this settle ensures the account state is current before termination.
+		railID := discoverRailID(node)
+		if railID != nil {
+			head, err := node.ChainHead(ctx)
+			if err == nil {
+				settleCalldata := foc.BuildCalldata(foc.SigSettleRail,
+					foc.EncodeBigInt(railID),
+					foc.EncodeBigInt(big.NewInt(int64(head.Height()))),
+				)
+				foc.SendEthTxConfirmed(ctx, node, focCfg.ClientKey, focCfg.FilPayAddr, settleCalldata, "foc-pre-term-settle")
+			}
+		}
+
+		// terminateService takes the on-chain dataSetId (from PDPVerifier), not the clientDataSetId
 		calldata := foc.BuildCalldata(foc.SigTerminateService,
-			foc.EncodeBigInt(s.ClientDataSetID),
+			foc.EncodeBigInt(big.NewInt(int64(s.OnChainDataSetID))),
 		)
 
-		ok := foc.SendEthTxConfirmed(ctx, node, focCfg.SPKey, focCfg.FWSSAddr, calldata, "foc-terminate-svc")
+		// Use client key (payer) — terminateService allows payer or SP.
+		ok := foc.SendEthTxConfirmed(ctx, node, focCfg.ClientKey, focCfg.FWSSAddr, calldata, "foc-terminate-svc")
 		if !ok {
-			log.Printf("[foc-delete-ds] terminateService failed for clientDataSetId=%s, will retry", s.ClientDataSetID)
+			log.Printf("[foc-delete-ds] terminateService failed for dataSetID=%d, will retry", s.OnChainDataSetID)
 			return
 		}
 

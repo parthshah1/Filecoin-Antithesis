@@ -107,9 +107,9 @@ func ParseEnvironment() *Config {
 // spKeyPaths lists candidate paths for the SP private key file.
 // The curio data volume may be mounted at different paths depending on the container.
 var spKeyPaths = []string{
-	"/var/lib/curio/private_key",      // curio container (filecoin_service template)
-	"/root/devgen/curio/private_key",  // workload container
-	"/shared/curio/private_key",       // filwizard container
+	"/var/lib/curio/private_key",     // curio container (filecoin_service template)
+	"/root/devgen/curio/private_key", // workload container
+	"/shared/curio/private_key",      // filwizard container
 }
 
 func (cfg *Config) loadSPKey() {

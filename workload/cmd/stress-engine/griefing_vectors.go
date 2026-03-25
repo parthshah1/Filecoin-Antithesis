@@ -328,6 +328,10 @@ func doGriefDispatch() {
 		{"InsolvencyCreation", probeInsolvencyCreation},
 		{"CrossPayerReplay", probeCrossPayerReplay},
 		{"BurstCreation", probeBurstCreation},
+		{"SettlementMonotonicity", probeSettlementMonotonicity},
+		{"TerminationEndEpoch", probeTerminationEndEpoch},
+		{"UnauthorizedTermination", probeUnauthorizedTermination},
+		{"LockupInvariant", probeLockupInvariant},
 	}
 	pick := probes[rngIntn(len(probes))]
 	log.Printf("[pdp-griefing] dispatching: %s", pick.name)
@@ -734,6 +738,208 @@ func probeBurstCreation() {
 	griefRT.DSCreated += accepted
 	griefRT.LastFunds = fundsAfter
 	griefMu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Economic Invariant: Settlement Monotonicity
+// ---------------------------------------------------------------------------
+
+// probeSettlementMonotonicity settles the FOC primary rail and verifies
+// settledUpTo only advances forward. Catches off-by-one regressions (#417, #416).
+func probeSettlementMonotonicity() {
+	s := snap()
+	if s.State != focStateReady || s.OnChainDataSetID == 0 {
+		return
+	}
+	if focCfg.ClientKey == nil || focCfg.FilPayAddr == nil {
+		return
+	}
+
+	node := focNode()
+
+	railID := discoverRailID(node)
+	if railID == nil {
+		return
+	}
+
+	settledBefore := foc.ReadRailSettledUpTo(ctx, node, focCfg.FilPayAddr, railID.Uint64())
+	if settledBefore == nil {
+		return
+	}
+
+	head, err := node.ChainHead(ctx)
+	if err != nil {
+		return
+	}
+	currentEpoch := big.NewInt(int64(head.Height()))
+
+	settleCalldata := foc.BuildCalldata(foc.SigSettleRail,
+		foc.EncodeBigInt(railID),
+		foc.EncodeBigInt(currentEpoch),
+	)
+
+	ok := foc.SendEthTxConfirmed(ctx, node, focCfg.ClientKey, focCfg.FilPayAddr, settleCalldata, "pdp-griefing-settle-mono")
+	if !ok {
+		return
+	}
+
+	settledAfter := foc.ReadRailSettledUpTo(ctx, node, focCfg.FilPayAddr, railID.Uint64())
+	if settledAfter == nil {
+		return
+	}
+
+	monotonic := settledAfter.Cmp(settledBefore) >= 0
+	noOvershoot := settledAfter.Cmp(currentEpoch) <= 0
+
+	assert.Sometimes(monotonic,
+		"settledUpTo advances monotonically",
+		map[string]any{
+			"railID":        railID.String(),
+			"settledBefore": settledBefore.String(),
+			"settledAfter":  settledAfter.String(),
+		})
+
+	assert.Sometimes(noOvershoot,
+		"settledUpTo does not overshoot requested epoch",
+		map[string]any{
+			"railID":       railID.String(),
+			"settledAfter": settledAfter.String(),
+			"currentEpoch": currentEpoch.String(),
+		})
+
+	log.Printf("[pdp-griefing] settlement monotonicity: railID=%s before=%s after=%s epoch=%s monotonic=%v overshoot=%v",
+		railID, settledBefore, settledAfter, currentEpoch, monotonic, !noOvershoot)
+}
+
+// ---------------------------------------------------------------------------
+// Economic Invariant: Termination EndEpoch Immutability
+// ---------------------------------------------------------------------------
+
+// probeTerminationEndEpoch checks that endEpoch is set and immutable after
+// service termination. Only fires during the termination window.
+func probeTerminationEndEpoch() {
+	s := snap()
+	if !s.TerminationInitiated || s.OnChainDataSetID == 0 {
+		return
+	}
+	if focCfg.FilPayAddr == nil {
+		return
+	}
+
+	node := focNode()
+
+	railID := discoverRailID(node)
+	if railID == nil {
+		return
+	}
+
+	endEpoch := foc.ReadRailEndEpoch(ctx, node, focCfg.FilPayAddr, railID.Uint64())
+	if endEpoch == nil {
+		return
+	}
+
+	assert.Sometimes(endEpoch.Sign() > 0,
+		"endEpoch set after termination",
+		map[string]any{
+			"railID":   railID.String(),
+			"endEpoch": endEpoch.String(),
+		})
+
+	// Read again to verify immutability
+	endEpoch2 := foc.ReadRailEndEpoch(ctx, node, focCfg.FilPayAddr, railID.Uint64())
+	if endEpoch2 != nil {
+		immutable := endEpoch.Cmp(endEpoch2) == 0
+		assert.Sometimes(immutable,
+			"endEpoch immutable post-termination",
+			map[string]any{
+				"railID":    railID.String(),
+				"endEpoch1": endEpoch.String(),
+				"endEpoch2": endEpoch2.String(),
+			})
+	}
+
+	settledUpTo := foc.ReadRailSettledUpTo(ctx, node, focCfg.FilPayAddr, railID.Uint64())
+	rate := foc.ReadRailPaymentRate(ctx, node, focCfg.FilPayAddr, railID.Uint64())
+
+	log.Printf("[pdp-griefing] termination window: railID=%s endEpoch=%s settledUpTo=%v rate=%v",
+		railID, endEpoch, settledUpTo, rate)
+}
+
+// ---------------------------------------------------------------------------
+// Authorization: Unauthorized Termination
+// ---------------------------------------------------------------------------
+
+// probeUnauthorizedTermination attempts to terminate the FOC primary dataset
+// using the secondary client (attacker) key. Should revert — only payer or SP
+// can terminate.
+func probeUnauthorizedTermination() {
+	s := snap()
+	if s.State != focStateReady || s.ClientDataSetID == nil {
+		return
+	}
+
+	gs := griefSnap()
+	if gs.ClientKey == nil {
+		return
+	}
+
+	node := focNode()
+
+	// terminateService takes on-chain dataSetId, not clientDataSetId
+	calldata := foc.BuildCalldata(foc.SigTerminateService,
+		foc.EncodeBigInt(big.NewInt(int64(s.OnChainDataSetID))),
+	)
+
+	log.Printf("[pdp-griefing] attempting unauthorized termination of dataSetID=%d", s.OnChainDataSetID)
+	ok := foc.SendEthTxConfirmed(ctx, node, gs.ClientKey, focCfg.FWSSAddr, calldata, "pdp-griefing-unauth-term")
+
+	assert.Sometimes(!ok,
+		"unauthorized termination rejected",
+		map[string]any{
+			"clientDataSetID": s.ClientDataSetID.String(),
+			"rejected":        !ok,
+		})
+
+	if ok {
+		log.Printf("[pdp-griefing] CRITICAL: unauthorized termination succeeded! clientDSID=%s", s.ClientDataSetID)
+	} else {
+		log.Printf("[pdp-griefing] unauthorized termination correctly rejected")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Economic Invariant: Lockup <= Funds
+// ---------------------------------------------------------------------------
+
+// probeLockupInvariant checks the fundamental FilecoinPay safety property:
+// funds >= lockupCurrent for the FOC primary client. If this is violated,
+// locked capital has been compromised.
+func probeLockupInvariant() {
+	if focCfg.FilPayAddr == nil || focCfg.USDFCAddr == nil || focCfg.ClientEthAddr == nil {
+		return
+	}
+
+	node := focNode()
+
+	funds := foc.ReadAccountFunds(ctx, node, focCfg.FilPayAddr, focCfg.USDFCAddr, focCfg.ClientEthAddr)
+	lockup := foc.ReadAccountLockup(ctx, node, focCfg.FilPayAddr, focCfg.USDFCAddr, focCfg.ClientEthAddr)
+
+	if funds == nil || lockup == nil {
+		return
+	}
+
+	safe := funds.Cmp(lockup) >= 0
+
+	assert.Sometimes(safe,
+		"funds >= lockup invariant holds",
+		map[string]any{
+			"funds":  funds.String(),
+			"lockup": lockup.String(),
+		})
+
+	if !safe {
+		log.Printf("[pdp-griefing] CRITICAL INVARIANT VIOLATION: funds=%s < lockup=%s", funds, lockup)
+	}
 }
 
 // ---------------------------------------------------------------------------
