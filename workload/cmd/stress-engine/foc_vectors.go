@@ -77,6 +77,7 @@ type focRuntime struct {
 
 	UploadedPieces []pieceRef // uploaded to Curio, not yet added on-chain
 	AddedPieces    []pieceRef // confirmed on-chain in proofset
+	DeletedPieces  []pieceRef // pieces that were scheduled for deletion
 
 	TerminationInitiated bool // true after terminateService has been called
 }
@@ -93,6 +94,7 @@ func snap() focRuntime {
 	s := focState
 	s.UploadedPieces = append([]pieceRef(nil), focState.UploadedPieces...)
 	s.AddedPieces = append([]pieceRef(nil), focState.AddedPieces...)
+	s.DeletedPieces = append([]pieceRef(nil), focState.DeletedPieces...)
 	return s
 }
 
@@ -544,6 +546,33 @@ func DoFOCTransfer() {
 	})
 }
 
+// discoverRailID finds the first payment rail for the FOC primary client.
+// Returns nil if no rail is found or on error.
+func discoverRailID(node api.FullNode) *big.Int {
+	if focCfg.ClientEthAddr == nil || focCfg.FilPayAddr == nil || focCfg.USDFCAddr == nil {
+		return nil
+	}
+
+	railCalldata := foc.BuildCalldata(foc.SigGetRailsByPayer,
+		foc.EncodeAddress(focCfg.ClientEthAddr),
+		foc.EncodeAddress(focCfg.USDFCAddr),
+		foc.EncodeBigInt(big.NewInt(0)),
+		foc.EncodeBigInt(big.NewInt(10)),
+	)
+
+	result, err := foc.EthCallRaw(ctx, node, focCfg.FilPayAddr, railCalldata)
+	if err != nil || len(result) < 96 {
+		return nil
+	}
+
+	arrayLen := new(big.Int).SetBytes(result[32:64])
+	if arrayLen.Sign() == 0 {
+		return nil
+	}
+
+	return new(big.Int).SetBytes(result[64:96])
+}
+
 // DoFOCSettle settles a payment rail on FilecoinPay.
 func DoFOCSettle() {
 	if _, ok := requireReady(); !ok {
@@ -555,31 +584,11 @@ func DoFOCSettle() {
 
 	node := focNode()
 
-	railCalldata := foc.BuildCalldata(foc.SigGetRailsByPayer,
-		foc.EncodeAddress(focCfg.ClientEthAddr),
-		foc.EncodeAddress(focCfg.USDFCAddr),
-		foc.EncodeBigInt(big.NewInt(0)),
-		foc.EncodeBigInt(big.NewInt(10)),
-	)
-
-	result, err := foc.EthCallRaw(ctx, node, focCfg.FilPayAddr, railCalldata)
-	if err != nil {
-		log.Printf("[foc-settle] getRailsForPayerAndToken failed: %v", err)
-		return
-	}
-
-	if len(result) < 96 {
-		log.Printf("[foc-settle] no rails found (result too short: %d bytes)", len(result))
-		return
-	}
-
-	arrayLen := new(big.Int).SetBytes(result[32:64])
-	if arrayLen.Sign() == 0 {
+	railID := discoverRailID(node)
+	if railID == nil {
 		log.Printf("[foc-settle] no rails found")
 		return
 	}
-
-	railID := new(big.Int).SetBytes(result[64:96])
 
 	head, err := node.ChainHead(ctx)
 	if err != nil {
@@ -639,7 +648,9 @@ func DoFOCWithdraw() {
 	})
 }
 
-// DoFOCDeletePiece schedules deletion of a piece from the proofset.
+// DoFOCDeletePiece schedules deletion of a piece from the proofset and verifies
+// the deletion affected piece count. The piece is tracked in DeletedPieces for
+// later retrieval verification.
 func DoFOCDeletePiece() {
 	if focCfg == nil || focCfg.ClientKey == nil ||
 		focCfg.FWSSAddr == nil || focCfg.PDPAddr == nil {
@@ -668,6 +679,11 @@ func DoFOCDeletePiece() {
 	}
 
 	node := focNode()
+	dsIDBytes := foc.EncodeBigInt(big.NewInt(int64(dsID)))
+
+	// Read piece count BEFORE deletion
+	countBefore, _ := foc.EthCallUint256(ctx, node, focCfg.PDPAddr,
+		foc.BuildCalldata(foc.SigGetActivePieceCount, dsIDBytes))
 
 	pieceIDBig := big.NewInt(int64(piece.PieceID))
 	sig, err := foc.SignEIP712SchedulePieceRemovals(
@@ -676,6 +692,7 @@ func DoFOCDeletePiece() {
 	)
 	if err != nil {
 		log.Printf("[foc-delete-piece] EIP-712 signing failed: %v", err)
+		returnPiece(piece)
 		return
 	}
 
@@ -689,13 +706,48 @@ func DoFOCDeletePiece() {
 		extraData,
 	)
 
-	ok := foc.SendEthTx(ctx, node, focCfg.SPKey, focCfg.PDPAddr, calldata, "foc-delete-piece")
+	ok := foc.SendEthTxConfirmed(ctx, node, focCfg.SPKey, focCfg.PDPAddr, calldata, "foc-delete-piece")
+	if !ok {
+		log.Printf("[foc-delete-piece] deletion tx failed, returning piece")
+		returnPiece(piece)
+		return
+	}
 
-	log.Printf("[foc-delete-piece] pieceID=%d cid=%s ok=%v", piece.PieceID, piece.PieceCID, ok)
+	// Read piece count AFTER deletion
+	countAfter, _ := foc.EthCallUint256(ctx, node, focCfg.PDPAddr,
+		foc.BuildCalldata(foc.SigGetActivePieceCount, dsIDBytes))
+
+	if countBefore != nil && countAfter != nil {
+		assert.Sometimes(countAfter.Cmp(countBefore) <= 0,
+			"piece count does not increase after deletion",
+			map[string]any{
+				"pieceID":     piece.PieceID,
+				"countBefore": countBefore.String(),
+				"countAfter":  countAfter.String(),
+			})
+	}
+
+	// Try to retrieve the deleted piece — should eventually fail
+	_, retrieveErr := foc.DownloadPiece(ctx, piece.PieceCID)
+	assert.Sometimes(retrieveErr != nil,
+		"deleted piece becomes unretrievable",
+		map[string]any{
+			"pieceCID":     piece.PieceCID,
+			"retrieveErr":  retrieveErr != nil,
+		})
+
+	log.Printf("[foc-delete-piece] pieceID=%d cid=%s countBefore=%v countAfter=%v retrievable=%v",
+		piece.PieceID, piece.PieceCID, countBefore, countAfter, retrieveErr == nil)
+
 	assert.Sometimes(ok, "piece deletion scheduled", map[string]any{
 		"pieceID":  piece.PieceID,
 		"pieceCID": piece.PieceCID,
 	})
+
+	// Track deleted piece for later retrieval checks
+	focStateMu.Lock()
+	focState.DeletedPieces = append(focState.DeletedPieces, piece)
+	focStateMu.Unlock()
 }
 
 // DoFOCDeleteDataSet deletes the entire dataset following the proper FWSS
@@ -779,6 +831,7 @@ func DoFOCDeleteDataSet() {
 		focState.ClientDataSetID = nil
 		focState.AddedPieces = nil
 		focState.UploadedPieces = nil
+		focState.DeletedPieces = nil
 		focState.TerminationInitiated = false
 		focStateMu.Unlock()
 	}
