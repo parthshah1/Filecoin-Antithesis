@@ -754,8 +754,10 @@ func DoFOCDeletePiece() {
 // termination pipeline:
 //
 //	Phase 1: Call FWSS.terminateService(clientDataSetId) to initiate termination.
-//	Phase 2: Call PDPVerifier.deleteDataSet(dataSetId, extraData) after the
-//	         service termination epoch has passed.
+//	         Snapshots pre-termination state for post-deletion assertions.
+//	Phase 2: Verify termination window behavior, then call
+//	         PDPVerifier.deleteDataSet(dataSetId, extraData) after the
+//	         PdpEndEpoch has passed. Asserts post-deletion invariants.
 //
 // Each deck invocation advances one phase. Phase 2 may need multiple attempts
 // while waiting for the PdpEndEpoch to pass (the contract will revert if early).
@@ -775,9 +777,16 @@ func DoFOCDeleteDataSet() {
 	}
 
 	node := focNode()
+	dsIDBytes := foc.EncodeBigInt(big.NewInt(int64(s.OnChainDataSetID)))
 
 	// Phase 1: Initiate service termination via FWSS
 	if !s.TerminationInitiated {
+		// Snapshot pre-termination state for later comparison
+		preTermFunds := foc.ReadAccountFunds(ctx, node, focCfg.FilPayAddr, focCfg.USDFCAddr, focCfg.ClientEthAddr)
+		preTermLockup := foc.ReadAccountLockup(ctx, node, focCfg.FilPayAddr, focCfg.USDFCAddr, focCfg.ClientEthAddr)
+		preTermPieces, _ := foc.EthCallUint256(ctx, node, focCfg.PDPAddr,
+			foc.BuildCalldata(foc.SigGetActivePieceCount, dsIDBytes))
+
 		calldata := foc.BuildCalldata(foc.SigTerminateService,
 			foc.EncodeBigInt(s.ClientDataSetID),
 		)
@@ -788,8 +797,8 @@ func DoFOCDeleteDataSet() {
 			return
 		}
 
-		log.Printf("[foc-delete-ds] service termination initiated: clientDataSetId=%s dataSetID=%d",
-			s.ClientDataSetID, s.OnChainDataSetID)
+		log.Printf("[foc-delete-ds] service termination initiated: clientDataSetId=%s dataSetID=%d preFunds=%v preLockup=%v prePieces=%v",
+			s.ClientDataSetID, s.OnChainDataSetID, preTermFunds, preTermLockup, preTermPieces)
 		assert.Sometimes(true, "FWSS service termination initiated", map[string]any{
 			"clientDataSetId": s.ClientDataSetID.String(),
 			"dataSetID":       s.OnChainDataSetID,
@@ -801,7 +810,21 @@ func DoFOCDeleteDataSet() {
 		return
 	}
 
-	// Phase 2: Delete the dataset on PDPVerifier (requires termination epoch to have passed)
+	// Phase 2: Termination window checks + delete
+
+	// Check dataset is still live during termination window (before endEpoch)
+	live, err := foc.EthCallBool(ctx, node, focCfg.PDPAddr,
+		foc.BuildCalldata(foc.SigDataSetLive, dsIDBytes))
+	if err == nil {
+		assert.Sometimes(live, "dataset remains live during termination window", map[string]any{
+			"dataSetID": s.OnChainDataSetID,
+		})
+	}
+
+	// Read pre-deletion lockup for comparison
+	lockupBefore := foc.ReadAccountLockup(ctx, node, focCfg.FilPayAddr, focCfg.USDFCAddr, focCfg.ClientEthAddr)
+
+	// Attempt deletion
 	sig, err := foc.SignEIP712DeleteDataSet(
 		focCfg.ClientKey, focCfg.FWSSAddr, s.ClientDataSetID,
 	)
@@ -825,6 +848,52 @@ func DoFOCDeleteDataSet() {
 	})
 
 	if sent {
+		// Post-deletion assertions
+
+		// Dataset should no longer be live
+		liveAfter, err := foc.EthCallBool(ctx, node, focCfg.PDPAddr,
+			foc.BuildCalldata(foc.SigDataSetLive, dsIDBytes))
+		if err == nil {
+			assert.Sometimes(!liveAfter, "dataset not live after deletion", map[string]any{
+				"dataSetID": s.OnChainDataSetID,
+				"live":      liveAfter,
+			})
+			if liveAfter {
+				log.Printf("[foc-delete-ds] WARNING: dataset %d still live after deletion!", s.OnChainDataSetID)
+			}
+		}
+
+		// Piece count should be zero
+		piecesAfter, err := foc.EthCallUint256(ctx, node, focCfg.PDPAddr,
+			foc.BuildCalldata(foc.SigGetActivePieceCount, dsIDBytes))
+		if err == nil && piecesAfter != nil {
+			assert.Sometimes(piecesAfter.Sign() == 0, "piece count zero after dataset deletion", map[string]any{
+				"dataSetID":   s.OnChainDataSetID,
+				"piecesAfter": piecesAfter.String(),
+			})
+		}
+
+		// Lockup should decrease (rails terminated, lockup released)
+		lockupAfter := foc.ReadAccountLockup(ctx, node, focCfg.FilPayAddr, focCfg.USDFCAddr, focCfg.ClientEthAddr)
+		if lockupBefore != nil && lockupAfter != nil {
+			released := lockupAfter.Cmp(lockupBefore) < 0
+			assert.Sometimes(released, "lockup released after dataset deletion", map[string]any{
+				"lockupBefore": lockupBefore.String(),
+				"lockupAfter":  lockupAfter.String(),
+			})
+			log.Printf("[foc-delete-ds] lockup: before=%s after=%s released=%v", lockupBefore, lockupAfter, released)
+		}
+
+		// Try retrieving a previously-added piece — should fail
+		if len(s.AddedPieces) > 0 {
+			testPiece := s.AddedPieces[rngIntn(len(s.AddedPieces))]
+			_, retrieveErr := foc.DownloadPiece(ctx, testPiece.PieceCID)
+			assert.Sometimes(retrieveErr != nil, "pieces unretrievable after dataset deletion", map[string]any{
+				"pieceCID": testPiece.PieceCID,
+			})
+		}
+
+		// Reset lifecycle
 		focStateMu.Lock()
 		focState.State = focStateInit
 		focState.OnChainDataSetID = 0
