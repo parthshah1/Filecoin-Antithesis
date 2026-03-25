@@ -466,11 +466,9 @@ func DoFOCAddPieces() {
 		}
 	} else {
 		// Curio confirmed the piece was added but didn't return IDs.
-		// Track by CID so retrieval verification can still work.
-		focState.AddedPieces = append(focState.AddedPieces, pieceRef{
-			PieceCID: piece.PieceCID,
-			PieceID:  0,
-		})
+		// Don't add to AddedPieces — deletion requires a valid on-chain piece ID.
+		// The piece is still on-chain but we can't track it for deletion.
+		log.Printf("[foc-add-pieces] piece added but no confirmed ID returned, skipping delete tracking")
 	}
 	focStateMu.Unlock()
 }
