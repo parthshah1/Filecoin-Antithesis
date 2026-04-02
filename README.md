@@ -71,85 +71,43 @@ make show-versions   # Show image version tags
 
 The workload container runs a **stress engine** that continuously picks weighted actions ("vectors") and executes them against Lotus and Forest nodes. Each vector uses Antithesis SDK assertions to verify safety and liveness.
 
-The engine runs two different vector decks depending on the profile:
-- **Default (filecoin)**: Consensus + mempool + EVM + cross-node + state + reorg vectors
-- **FOC (filecoin-foc)**: Consensus + FOC lifecycle + steady-state storage vectors
+### Profiles
 
-### Consensus Vectors (always active)
+Pick a test scenario with one env var:
 
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoTipsetConsensus` | `STRESS_WEIGHT_TIPSET_CONSENSUS` | Cross-node tipset agreement |
-| `DoHeightProgression` | `STRESS_WEIGHT_HEIGHT_PROGRESSION` | Chain height advances |
-| `DoPeerCount` | `STRESS_WEIGHT_PEER_COUNT` | Peer connectivity |
-| `DoHeadComparison` | `STRESS_WEIGHT_HEAD_COMPARISON` | Cross-node chain head match |
-| `DoStateRootComparison` | `STRESS_WEIGHT_STATE_ROOT` | Cross-node state root match |
-| `DoStateAudit` | `STRESS_WEIGHT_STATE_AUDIT` | Full state tree audit |
+```bash
+STRESS_PROFILE=default     # Consensus checks + basic EVM stress (newcomer-friendly)
+STRESS_PROFILE=consensus   # Heavy state/F3/cross-node validation
+STRESS_PROFILE=chaos       # Adversarial: reorg, slashing, quorum boundary
+STRESS_PROFILE=upgrade     # Network upgrade testing (FIP-specific vectors)
+STRESS_PROFILE=nsplit      # N-split attack scenario: heavy reorg + power slashing
+STRESS_PROFILE=full        # All vectors enabled at equal weight
+```
 
-### Mempool Vectors (non-FOC)
+Set `STRESS_PROFILE=help` to list all profiles with descriptions and category multipliers.
 
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoTransferMarket` | `STRESS_WEIGHT_TRANSFER` | Random FIL transfers between wallets |
-| `DoGasWar` | `STRESS_WEIGHT_GAS_WAR` | Gas premium replacement racing |
-| `DoHeavyCompute` | `STRESS_WEIGHT_HEAVY_COMPUTE` | StateCompute re-execution verification |
-| `DoAdversarial` | `STRESS_WEIGHT_ADVERSARIAL` | Double-spend, invalid sigs, nonce races |
+Vectors are grouped into **categories** (consensus, evm, crossnode, state, chaos, resource, upgrade, foc). Each profile sets a multiplier per category. Fine-tune with:
 
-### FVM/EVM Vectors (non-FOC)
+```bash
+STRESS_CATEGORY_CHAOS=5          # Scale an entire category
+STRESS_WEIGHT_REORG=10           # Override a single vector
+```
 
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoDeployContracts` | `STRESS_WEIGHT_DEPLOY` | Deploy EVM contracts via EAM |
-| `DoContractCall` | `STRESS_WEIGHT_CONTRACT_CALL` | Invoke contracts (recursion, delegatecall, tokens) |
-| `DoSelfDestructCycle` | `STRESS_WEIGHT_SELFDESTRUCT` | Deploy, destroy, cross-node verify |
-| `DoConflictingContractCalls` | `STRESS_WEIGHT_CONTRACT_RACE` | Same-nonce contract calls to different nodes |
-| `DoMaxBlockGas` | `STRESS_WEIGHT_MAX_BLOCK_GAS` | Gas limit edge cases |
-| `DoLogBlaster` | `STRESS_WEIGHT_LOG_BLASTER` | Excessive event logging |
-| `DoMemoryBomb` | `STRESS_WEIGHT_MEMORY_BOMB` | Memory pressure |
-| `DoStorageSpam` | `STRESS_WEIGHT_STORAGE_SPAM` | Storage stress |
+The startup log shows exactly how each weight was resolved.
 
-### Cross-Node Divergence Vectors (non-FOC)
+For full documentation see [workload/README.md](workload/README.md):
+- [Profiles in depth](workload/README.md#profiles-in-depth) -- what each profile runs and when to use it
+- [How weight resolution works](workload/README.md#how-weight-resolution-works) -- override layers explained with examples
+- [All vectors reference](workload/README.md#all-vectors-reference) -- every vector, its category, base weight, and env var
+- [Extending the stress engine](workload/README.md#extending-the-stress-engine) -- how to add vectors, categories, or profiles
+- [Running locally](workload/README.md#running-locally) -- docker compose commands and profile switching
+- [Branching model](workload/README.md#branching-model-running-your-own-tests) -- how teams branch off main for test campaigns
 
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoReceiptAudit` | `STRESS_WEIGHT_RECEIPT_AUDIT` | Receipt comparison across nodes |
-| `DoMessageOrderingAttack` | `STRESS_WEIGHT_MSG_ORDERING` | Conflicting txs from same sender |
-| `DoNonceBombard` | `STRESS_WEIGHT_NONCE_BOMBARD` | Rapid nonce sequences |
-| `DoGasExhaustionEdge` | `STRESS_WEIGHT_GAS_EXHAUST` | Gas limit edge cases |
+### FOC Profile
 
-### State Vectors (non-FOC)
+When the FOC compose profile is active (`--profile foc`), the engine auto-detects FOC mode and runs consensus + FOC lifecycle vectors. An explicit `STRESS_PROFILE` can override this.
 
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoActorMigrationStress` | `STRESS_WEIGHT_ACTOR_MIGRATION` | State tree access via deploy/destroy cycles |
-| `DoActorLifecycleStress` | `STRESS_WEIGHT_ACTOR_LIFECYCLE` | Actor creation/interaction patterns |
-
-### Network Chaos (non-FOC)
-
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoReorgChaos` | `STRESS_WEIGHT_REORG` | Rapid partition, mine, heal cycles |
-
-### FOC Vectors (FOC profile only)
-
-| Vector | Env Var | Description |
-|--------|---------|-------------|
-| `DoFOCLifecycle` | `STRESS_WEIGHT_FOC_LIFECYCLE` | Sequential state machine (Init through Ready) |
-| `DoFOCUploadPiece` | `STRESS_WEIGHT_FOC_UPLOAD` | Upload random data to Curio PDP API |
-| `DoFOCAddPieces` | `STRESS_WEIGHT_FOC_ADD_PIECES` | Add pieces to on-chain proofset |
-| `DoFOCMonitorProofSet` | `STRESS_WEIGHT_FOC_MONITOR` | Query proofset health + USDFC balances |
-| `DoFOCRetrieveAndVerify` | `STRESS_WEIGHT_FOC_RETRIEVE` | Download piece and verify CID |
-| `DoFOCTransfer` | `STRESS_WEIGHT_FOC_TRANSFER` | ERC-20 USDFC transfer |
-| `DoFOCSettle` | `STRESS_WEIGHT_FOC_SETTLE` | Settle active payment rail |
-| `DoFOCWithdraw` | `STRESS_WEIGHT_FOC_WITHDRAW` | Withdraw USDFC from FilecoinPay |
-| `DoFOCDeletePiece` | `STRESS_WEIGHT_FOC_DELETE_PIECE` | Schedule piece deletion from proofset (weight 0 default) |
-| `DoFOCDeleteDataSet` | `STRESS_WEIGHT_FOC_DELETE_DS` | Delete dataset + reset lifecycle (weight 0 default) |
-
-Weights are configured in `docker-compose.yaml` environment. Set to `0` to disable.
-
-### FOC Sidecar
-
-During FOC runs, a separate `foc-sidecar` process runs alongside the stress engine. It continuously monitors on-chain FOC contract state and emits `assert.Always` safety assertions (e.g. proofset integrity, balance invariants, event consistency). See `workload/FOC.md` for full architecture details.
+A separate `foc-sidecar` process monitors on-chain FOC contract state and emits safety assertions. See [workload/FOC.md](workload/FOC.md) for architecture details.
 
 ### Reorg Safety
 

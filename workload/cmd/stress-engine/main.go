@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -237,96 +238,34 @@ func initNonces() {
 // ---------------------------------------------------------------------------
 
 func buildDeck() {
-	type weightedAction struct {
-		name      string
-		envVar    string
-		fn        func()
-		defWeight int
-	}
+	profile, mults := resolveProfile()
 
-	// Consensus / health-check vectors — always active in both profiles
-	consensus := []weightedAction{
-		{"DoTipsetConsensus", "STRESS_WEIGHT_TIPSET_CONSENSUS", DoTipsetConsensus, 3},
-		{"DoHeightProgression", "STRESS_WEIGHT_HEIGHT_PROGRESSION", DoHeightProgression, 2},
-		{"DoPeerCount", "STRESS_WEIGHT_PEER_COUNT", DoPeerCount, 2},
-		{"DoHeadComparison", "STRESS_WEIGHT_HEAD_COMPARISON", DoHeadComparison, 3},
-		{"DoStateRootComparison", "STRESS_WEIGHT_STATE_ROOT", DoStateRootComparison, 4},
-		{"DoStateAudit", "STRESS_WEIGHT_STATE_AUDIT", DoStateAudit, 5},
-		{"DoF3FinalityMonitor", "STRESS_WEIGHT_F3_MONITOR", DoF3FinalityMonitor, 2},
-	}
-
-	// Non-FOC stress vectors — skipped when FOC profile is active (covered by filecoin run)
-	stress := []weightedAction{
-		{"DoTransferMarket", "STRESS_WEIGHT_TRANSFER", DoTransferMarket, 0},
-		{"DoGasWar", "STRESS_WEIGHT_GAS_WAR", DoGasWar, 0},
-		{"DoHeavyCompute", "STRESS_WEIGHT_HEAVY_COMPUTE", DoHeavyCompute, 0},
-		{"DoAdversarial", "STRESS_WEIGHT_ADVERSARIAL", DoAdversarial, 0},
-		// FVM/EVM contract stress vectors
-		{"DoDeployContracts", "STRESS_WEIGHT_DEPLOY", DoDeployContracts, 2},
-		{"DoContractCall", "STRESS_WEIGHT_CONTRACT_CALL", DoContractCall, 3},
-		{"DoSelfDestructCycle", "STRESS_WEIGHT_SELFDESTRUCT", DoSelfDestructCycle, 1},
-		{"DoConflictingContractCalls", "STRESS_WEIGHT_CONTRACT_RACE", DoConflictingContractCalls, 2},
-		// Resource stress vectors
-		{"DoMaxBlockGas", "STRESS_WEIGHT_MAX_BLOCK_GAS", DoMaxBlockGas, 0},
-		{"DoLogBlaster", "STRESS_WEIGHT_LOG_BLASTER", DoLogBlaster, 0},
-		{"DoMemoryBomb", "STRESS_WEIGHT_MEMORY_BOMB", DoMemoryBomb, 0},
-		{"DoStorageSpam", "STRESS_WEIGHT_STORAGE_SPAM", DoStorageSpam, 0},
-		// Network chaos / reorg vectors
-		{"DoReorgChaos", "STRESS_WEIGHT_REORG", DoReorgChaos, 0},
-		// Power-aware miner slashing (replaces DoConsensusFault)
-		{"DoPowerAwareSlash", "STRESS_WEIGHT_POWER_SLASH", DoPowerAwareSlash, 0},
-		// Deliberate F3 quorum stall (opt-in, destructive)
-		{"DoQuorumBoundaryTest", "STRESS_WEIGHT_QUORUM_STALL", DoQuorumBoundaryTest, 0},
-		// Cross-node divergence vectors
-		{"DoReceiptAudit", "STRESS_WEIGHT_RECEIPT_AUDIT", DoReceiptAudit, 2},
-		{"DoMessageOrderingAttack", "STRESS_WEIGHT_MSG_ORDERING", DoMessageOrderingAttack, 1},
-		{"DoNonceBombard", "STRESS_WEIGHT_NONCE_BOMBARD", DoNonceBombard, 1},
-		{"DoGasExhaustionEdge", "STRESS_WEIGHT_GAS_EXHAUST", DoGasExhaustionEdge, 1},
-		// State tree consistency vectors
-		{"DoActorMigrationStress", "STRESS_WEIGHT_ACTOR_MIGRATION", DoActorMigrationStress, 1},
-		{"DoActorLifecycleStress", "STRESS_WEIGHT_ACTOR_LIFECYCLE", DoActorLifecycleStress, 1},
-	}
-
-	// Build actions list: consensus always, stress only when FOC is not active
-	actions := append([]weightedAction{}, consensus...)
-	if focCfg == nil {
-		actions = append(actions, stress...)
-	} else {
-		log.Println("[init] FOC active — skipping non-FOC stress vectors (covered by filecoin run)")
-	}
-
-	// FOC lifecycle vectors — only when FOC profile is active
+	// Gather applicable vectors
+	vectors := coreVectors()
 	if focCfg != nil {
-		actions = append(actions,
-			// Sequential lifecycle state machine (drives setup to completion)
-			weightedAction{"DoFOCLifecycle", "STRESS_WEIGHT_FOC_LIFECYCLE", DoFOCLifecycle, 3},
-			// Steady-state vectors (only fire once lifecycle reaches Ready)
-			weightedAction{"DoFOCUploadPiece", "STRESS_WEIGHT_FOC_UPLOAD", DoFOCUploadPiece, 2},
-			weightedAction{"DoFOCAddPieces", "STRESS_WEIGHT_FOC_ADD_PIECES", DoFOCAddPieces, 1},
-			weightedAction{"DoFOCMonitorProofSet", "STRESS_WEIGHT_FOC_MONITOR", DoFOCMonitorProofSet, 3},
-			weightedAction{"DoFOCRetrieveAndVerify", "STRESS_WEIGHT_FOC_RETRIEVE", DoFOCRetrieveAndVerify, 1},
-			weightedAction{"DoFOCTransfer", "STRESS_WEIGHT_FOC_TRANSFER", DoFOCTransfer, 1},
-			weightedAction{"DoFOCSettle", "STRESS_WEIGHT_FOC_SETTLE", DoFOCSettle, 1},
-			weightedAction{"DoFOCWithdraw", "STRESS_WEIGHT_FOC_WITHDRAW", DoFOCWithdraw, 1},
-			// Destructive — weight 0 by default (opt-in)
-			weightedAction{"DoFOCDeletePiece", "STRESS_WEIGHT_FOC_DELETE_PIECE", DoFOCDeletePiece, 0},
-			weightedAction{"DoFOCDeleteDataSet", "STRESS_WEIGHT_FOC_DELETE_DS", DoFOCDeleteDataSet, 0},
-		)
+		vectors = append(vectors, focVectors()...)
 	}
+
+	logProfileSummary(profile, mults)
 
 	deck = nil
-	for _, a := range actions {
-		w := envInt(a.envVar, a.defWeight)
+	for _, v := range vectors {
+		w := resolveWeight(v, mults)
 		if w > 0 {
-			log.Printf("[init] action %s: weight=%d", a.name, w)
+			suffix := ""
+			if _, ok := envIntIfSet(v.EnvVar); ok {
+				suffix = fmt.Sprintf("  (override: %s)", v.EnvVar)
+			}
+			log.Printf("[init]   %-35s cat=%-12s base=%d x mult=%d => %d%s",
+				v.Name, v.Category, v.BaseWeight, mults[v.Category], w, suffix)
 		}
 		for i := 0; i < w; i++ {
-			deck = append(deck, namedAction{name: a.name, fn: a.fn})
+			deck = append(deck, namedAction{name: v.Name, fn: v.Fn})
 		}
 	}
 
 	if len(deck) == 0 {
-		log.Fatal("[init] FATAL: deck is empty — set at least one STRESS_WEIGHT_* > 0")
+		log.Fatal("[init] FATAL: deck is empty — check STRESS_PROFILE or set weights > 0")
 	}
 	log.Printf("[init] deck built with %d entries", len(deck))
 }
@@ -337,6 +276,13 @@ func buildDeck() {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	// Handle STRESS_PROFILE=help before connecting to nodes
+	if os.Getenv("STRESS_PROFILE") == "help" {
+		printProfileHelp()
+		os.Exit(0)
+	}
+
 	log.Println("[engine] stress engine starting")
 
 	ctx, cancel = context.WithCancel(context.Background())
