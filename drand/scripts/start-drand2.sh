@@ -1,15 +1,26 @@
 #!/bin/bash
-set -e
 
 DRAND_DIR="/root/.drand"
 DKG_COMPLETE_MARKER="${DRAND_DIR}/multibeacon/default/groups/drand_group.toml"
 
 # ---------------------------------------------------------------------------
-# Restart path: DKG already completed, just resume beacon production
+# Restart path: DKG already completed, just resume beacon production.
+# Retry in a loop to handle transient port conflicts (TIME_WAIT) after
+# Antithesis kills and restarts the container.
 # ---------------------------------------------------------------------------
 if [ -f "$DKG_COMPLETE_MARKER" ]; then
-    echo "drand2: DKG already complete — restarting daemon in foreground"
-    exec drand start --private-listen drand2:8080 --control 127.0.0.1:8888 --public-listen 0.0.0.0:80
+    echo "drand2: DKG already complete — restarting daemon"
+    tries=10
+    while [ "$tries" -gt 0 ]; do
+        echo "drand2: starting daemon (attempt $(( 11 - tries ))/10)..."
+        drand start --private-listen drand2:8080 --control 127.0.0.1:8888 --public-listen 0.0.0.0:80
+        exit_code=$?
+        echo "drand2: daemon exited with code $exit_code"
+        tries=$(( tries - 1 ))
+        sleep 2
+    done
+    echo "ERROR: drand2 daemon failed to stay running after 10 attempts"
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -27,7 +38,7 @@ DRAND_PID=$!
 echo "drand2: waiting for local daemon to start..."
 tries=15
 while [ "$tries" -gt 0 ]; do
-    drand util check drand2:8080 2>/dev/null && break
+    if drand util check drand2:8080 2>/dev/null; then break; fi
     sleep 1
     tries=$(( tries - 1 ))
 done

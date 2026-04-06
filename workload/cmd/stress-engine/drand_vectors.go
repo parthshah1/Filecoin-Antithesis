@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/antithesishq/antithesis-sdk-go/assert"
 
@@ -15,12 +16,30 @@ import (
 //
 // Picks a random finalized height, collects BeaconEntries from every node's
 // block headers at that height, and asserts they are identical. Beacon
-// entries are deterministic (drand round → BLS signature) so any mismatch
+// entries are deterministic (drand round -> BLS signature) so any mismatch
 // in finalized blocks indicates a consensus or drand integration bug.
 //
 // Covers issue #229 scenario 7 (beacon entry audit) and validates
 // lotus#11500 concern 1 (correctness of drand usage across implementations).
 // ===========================================================================
+
+// beaconFingerprint builds a canonical fingerprint of all beacon entries
+// in a block. Multiple entries occur when null rounds are backfilled.
+func beaconFingerprint(entries []beaconEntryData) string {
+	if len(entries) == 0 {
+		return "empty"
+	}
+	parts := make([]string, len(entries))
+	for i, e := range entries {
+		parts[i] = fmt.Sprintf("%d:%s", e.round, e.sig)
+	}
+	return strings.Join(parts, "|")
+}
+
+type beaconEntryData struct {
+	round uint64
+	sig   string
+}
 
 func DoDrandBeaconAudit() {
 	if len(nodeKeys) < 2 {
@@ -40,11 +59,12 @@ func DoDrandBeaconAudit() {
 	checkHeight := abi.ChainEpoch(rngIntn(int(finalizedHeight)) + 1)
 
 	// Collect beacon fingerprints from each node at this height.
-	// Fingerprint = "round:hex(data)" for the last beacon entry in the first block.
 	type beaconResult struct {
 		fingerprint string
-		round       uint64
-		sigPrefix   string // first 16 hex chars for logging
+		actualHeight abi.ChainEpoch // actual tipset height (may differ from checkHeight on null rounds)
+		entryCount  int
+		lastRound   uint64
+		lastSig     string // first 16 hex chars for logging
 	}
 
 	results := make(map[string]beaconResult) // nodeName -> result
@@ -69,32 +89,52 @@ func DoDrandBeaconAudit() {
 		}
 
 		// All blocks in a tipset share the same beacon entries; use the first block.
-		be := blks[0].BeaconEntries
-		if len(be) == 0 {
-			// Null rounds or very early epochs may have no beacon entries
-			results[name] = beaconResult{fingerprint: "empty", round: 0, sigPrefix: ""}
-			continue
+		rawEntries := blks[0].BeaconEntries
+
+		entries := make([]beaconEntryData, len(rawEntries))
+		for i, be := range rawEntries {
+			entries[i] = beaconEntryData{
+				round: be.Round,
+				sig:   hex.EncodeToString(be.Data),
+			}
 		}
 
-		// Use the last (most recent) beacon entry for this epoch
-		latest := be[len(be)-1]
-		sig := hex.EncodeToString(latest.Data)
-		fp := fmt.Sprintf("%d:%s", latest.Round, sig)
+		fp := beaconFingerprint(entries)
 
-		prefix := sig
-		if len(prefix) > 16 {
-			prefix = prefix[:16]
+		var lastRound uint64
+		var lastSig string
+		if len(entries) > 0 {
+			last := entries[len(entries)-1]
+			lastRound = last.round
+			lastSig = last.sig
+			if len(lastSig) > 16 {
+				lastSig = lastSig[:16]
+			}
 		}
 
 		results[name] = beaconResult{
-			fingerprint: fp,
-			round:       latest.Round,
-			sigPrefix:   prefix,
+			fingerprint:  fp,
+			actualHeight: ts.Height(),
+			entryCount:   len(entries),
+			lastRound:    lastRound,
+			lastSig:      lastSig,
 		}
 	}
 
 	responded := len(results)
 	if responded < 2 {
+		return
+	}
+
+	// Check that all nodes returned the same actual height — if not, null-round
+	// resolution diverged (different finalized anchors), skip this check.
+	heights := make(map[abi.ChainEpoch]int)
+	for _, r := range results {
+		heights[r.actualHeight]++
+	}
+	if len(heights) > 1 {
+		debugLog("[drand-audit] height=%d returned different actual heights across nodes (null-round divergence), skipping",
+			checkHeight)
 		return
 	}
 
@@ -109,30 +149,37 @@ func DoDrandBeaconAudit() {
 	// Pick a sample for logging
 	var sampleRound uint64
 	var sampleSig string
+	var sampleHeight abi.ChainEpoch
 	for _, r := range results {
-		sampleRound = r.round
-		sampleSig = r.sigPrefix
+		sampleRound = r.lastRound
+		sampleSig = r.lastSig
+		sampleHeight = r.actualHeight
 		break
 	}
 
 	assert.Always(allMatch, "Drand beacon entries match across all nodes at finalized height", map[string]any{
-		"height":          checkHeight,
-		"finalized_at":    finalizedHeight,
-		"beacon_round":    sampleRound,
-		"beacon_sig":      sampleSig,
-		"unique_beacons":  len(groups),
-		"nodes_checked":   responded,
-		"errors":          errs,
+		"height":         checkHeight,
+		"actual_height":  sampleHeight,
+		"finalized_at":   finalizedHeight,
+		"beacon_round":   sampleRound,
+		"beacon_sig":     sampleSig,
+		"unique_beacons": len(groups),
+		"nodes_checked":  responded,
+		"errors":         errs,
 	})
 
 	if !allMatch {
-		log.Printf("[drand-audit] MISMATCH at height %d: %d unique beacon entries across %d nodes",
-			checkHeight, len(groups), responded)
+		log.Printf("[drand-audit] MISMATCH at height %d (actual %d): %d unique beacon entries across %d nodes",
+			checkHeight, sampleHeight, len(groups), responded)
 		for fp, names := range groups {
-			log.Printf("[drand-audit]   fingerprint=%s nodes=%v", fp[:min(40, len(fp))], names)
+			truncFp := fp
+			if len(truncFp) > 60 {
+				truncFp = truncFp[:60] + "..."
+			}
+			log.Printf("[drand-audit]   fingerprint=%s nodes=%v", truncFp, names)
 		}
 	} else {
-		debugLog("[drand-audit] height=%d beacon_round=%d sig=%s nodes=%d OK",
-			checkHeight, sampleRound, sampleSig, responded)
+		debugLog("[drand-audit] height=%d actual=%d beacon_round=%d sig=%s nodes=%d OK",
+			checkHeight, sampleHeight, sampleRound, sampleSig, responded)
 	}
 }
