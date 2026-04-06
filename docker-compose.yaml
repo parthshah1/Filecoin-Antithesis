@@ -137,7 +137,7 @@ services:
     image: workload:latest
     container_name: workload
     environment:
-      - STRESS_NODES=lotus0,lotus1,lotus2,lotus3
+      - STRESS_NODES=lotus0,lotus1,lotus2,lotus3,forest0
       - STRESS_RPC_PORT=1234
       - STRESS_FOREST_RPC_PORT=3456
       - STRESS_KEYSTORE_PATH=/shared/configs/stress_keystore.json
@@ -162,6 +162,9 @@ services:
       #
       # --- Non-FOC stress vectors ---
       #
+      # Eth RPC + RLP fuzzing (raw HTTP — CVE-informed)
+      - STRESS_WEIGHT_ETH_RLP_FUZZ=3 # malformed RLP, non-canonical encoding, OOM bombs
+      - STRESS_WEIGHT_ETH_RPC_STRESS=2 # adversarial eth_ params, lookback, malformed JSON
       # EVM contract stress
       - STRESS_WEIGHT_DEPLOY=1 # Init actor & state tree growth via EAM.CreateExternal
       - STRESS_WEIGHT_CONTRACT_CALL=1 # deep recursion, delegatecall, external recursive calls

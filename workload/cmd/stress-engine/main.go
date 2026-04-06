@@ -59,6 +59,9 @@ var (
 	pendingDeploys []pendingDeploy
 	pendingMu      sync.Mutex
 
+	// Raw HTTP URLs for each node (for raw RPC stress testing)
+	nodeURLs map[string]string
+
 	// FOC config — nil when the FOC compose profile is not active
 	focCfg *foc.Config
 )
@@ -148,6 +151,16 @@ func connectNodes() {
 	nodes, nodeKeys, err = chain.ConnectNodes(ctx, cfg)
 	if err != nil {
 		log.Fatalf("[init] FATAL: %v", err)
+	}
+
+	// Build raw HTTP URLs for each node (parallel to nodes map)
+	nodeURLs = make(map[string]string, len(nodeKeys))
+	for _, name := range nodeKeys {
+		port := cfg.Port
+		if len(name) >= 6 && name[:6] == "forest" && cfg.ForestPort != "" {
+			port = cfg.ForestPort
+		}
+		nodeURLs[name] = chain.NodeHTTPURL(name, port)
 	}
 }
 
@@ -272,6 +285,10 @@ func buildDeck() {
 		{"DoReceiptAudit", "STRESS_WEIGHT_RECEIPT_AUDIT", DoReceiptAudit, 2},
 		// Shallow reorg chaos — partition a node, let others mine, heal, verify convergence
 		{"DoReorgChaos", "STRESS_WEIGHT_REORG_CHAOS", DoReorgChaos, 0},
+		// Eth RLP fuzzing — RLP parsing attack surface (zero coverage, known CVE classes)
+		{"DoEthRLPFuzz", "STRESS_WEIGHT_ETH_RLP_FUZZ", DoEthRLPFuzz, 3},
+		// Eth RPC stress — raw HTTP adversarial requests (public RPC attack surface)
+		{"DoEthRPCStress", "STRESS_WEIGHT_ETH_RPC_STRESS", DoEthRPCStress, 2},
 	}
 
 	// Build actions list: consensus always, stress only when FOC is not active
