@@ -21,6 +21,7 @@ on:
           - drand
           - fip
           - foc
+          - amplification
       duration:
         type: string
         required: true

@@ -10,6 +10,7 @@ COPY ./env.consensus /profiles/env.consensus
 COPY ./env.drand     /profiles/env.drand
 COPY ./env.fip       /profiles/env.fip
 COPY ./env.foc       /profiles/env.foc
+COPY ./env.amplification /profiles/env.amplification
 
 COPY ./drand /drand
 COPY ./lotus /lotus

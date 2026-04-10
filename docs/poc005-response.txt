@@ -1,0 +1,68 @@
+We tested this in detail — ran the exact attack from the PoC against 4 live Lotus nodes in our Antithesis devnet. Here's what we found, and a broader observation about AI-generated vulnerability reports in the blockchain space.
+
+What the PoC gets right: The 8x memory amplification ratio is real. CBOR null bytes cost 1 byte on wire but 8 bytes per nil pointer in the pre-allocated slice. The math checks out.
+
+What the PoC misses — the two-phase sync architecture prevents the 120 MB payload from ever being fetched:
+
+Lotus chain sync has two distinct phases, and the PoC conflates them:
+
+Phase 1 — Initial FetchTipSet (small, always happens). When a peer sends Hello, the node does open a ChainExchange stream — the only pre-check is genesis hash match. There's no "unknown peer" gate. But this fetch only requests the claimed tipset CIDs — a single block's worth of data, not 120 MB.
+
+Phase 2 — Full chain sync / collectChain (where the 120 MB would be served). This only triggers if InformNewHead (chain/sync.go:197-254) succeeds. That function has multiple gates:
+
+  - IsEpochInConsensusRange: height must be within finality..now+5 epochs
+  - Bad block cache: CIDs not previously marked bad
+  - ValidateMsgMeta: message structure must be valid
+  - Weight comparison: uses ParentWeight from the actual fetched block headers — NOT the weight field from the Hello message
+
+Critically: the Hello weight field is a no-op. It's read but never used for any sync decision. Setting weight=999999999 in Hello does nothing. What matters is the ParentWeight encoded in the actual block headers served back in Phase 1. The PoC's claim that "Hello protocol weight claims are not cryptographically verified" is true but irrelevant — the weight is simply never used.
+
+Why our test showed zero 120 MB fetches: The nodes did not proceed to Phase 2 because the served blocks (which had null block headers in our amplification payload) failed InformNewHead validation. Even if we served realistic-looking block headers with inflated ParentWeight and valid epochs, they would still fail at consensus validation — signature verification, VRF proofs, WinPoSt proofs. The real defense isn't "don't sync from strangers" — it's "validate before committing resources to a full chain fetch."
+
+What we confirmed empirically: After several minutes of continuous attacks across all 4 nodes — zero 120 MB payloads consumed by victims, memory flat at 300-400 MB, no OOM, no restarts, no degradation. The smaller alloc-before-read variant (97 KB) was served 6 times via Phase 1 FetchTipSet — proving our delivery mechanism works. The nodes simply never escalate to Phase 2 where the large payload would be served.
+
+The broader pattern with AI-generated security reports: AI is effective at finding isolated code patterns — "this make() call pre-allocates based on untrusted input" — but it often lacks the protocol-level context that determines whether the vulnerable code path is actually reachable under real conditions. In this case, the PoC correctly identifies the allocation pattern in UnmarshalCBOR but doesn't account for the two-phase sync architecture that gates access to the vulnerable code path behind block validation. A PoC that calls UnmarshalCBOR directly in a unit test is not the same as a PoC that delivers a payload through the actual protocol stack. This report falls in that gap.
+
+To actually exploit this, an attacker would need to serve block headers that pass InformNewHead — valid epoch, valid message metadata, ParentWeight exceeding the real chain — and then serve the 120 MB amplification payload during collectChain. But blocks that pass InformNewHead still face full consensus validation (signatures, VRF, WinPoSt), making a practical exploit path significantly harder than the report suggests.
+
+---
+
+TL;DR: The memory math is real — 120 MB in, 960 MB allocated. But the node never actually reads the 120 MB. Lotus checks the block headers before downloading the full chain, and the PoC's fake headers don't pass those checks. We threw this at 4 live nodes for minutes — nothing happened. The bug exists in the code but there's no way to reach it through the network.
+
+---
+
+Point-by-point issues with the report's attack chain and amplifying factors:
+
+Attack Chain Step 2 — "Hello protocol: claim heavy chain weight (not crypto-verified) → chain/sync.go:240-250 compares weight only"
+
+Wrong. The Hello weight field is read but never used for any sync decision. InformNewHead (chain/sync.go:197-254) derives weight from the ParentWeight field in the actual fetched block headers, not from the Hello message. Setting weight=999999999 in Hello does literally nothing. The report treats the Hello weight as a sync trigger — it isn't.
+
+Attack Chain Step 4 — "Victim initiates chain sync, selects attacker as peer"
+
+Misleading. The victim does open a ChainExchange stream after Hello (genesis check only), but this Phase 1 fetch requests just the claimed tipset CIDs — one block's worth of data. The 120 MB payload would only be served during Phase 2 (collectChain), which requires InformNewHead to succeed. The report conflates these two phases.
+
+Attack Chain Step 5 — "Send crafted 120 MB response with null-filled message arrays"
+
+The 120 MB payload cannot be served in Phase 1. Phase 1 fetches a single tipset. The 419-tipset payload only applies to Phase 2, which is gated behind block validation (epoch range, message metadata, ParentWeight exceeding real chain). The PoC's null block headers fail all of these checks, so Phase 2 never triggers.
+
+Attack Chain Step 7 — "5 concurrent sync workers × 962 MB = ~4.8 GB"
+
+Speculative. The 5 workers only open streams to peers they're actively syncing from. For an attacker to occupy all 5, they'd need to pass InformNewHead validation 5 times with different tipsets — each requiring valid-looking block headers that survive epoch range checks, message metadata validation, and weight comparison. This is not addressed in the PoC.
+
+Amplifying Factor 1 — "Peer selection is gameable: Hello weight claims are not cryptographically verified"
+
+True but irrelevant. As stated above, Hello weight is never used for sync decisions. The actual gate is ParentWeight in the block headers, which is checked by InformNewHead.
+
+Amplifying Factor 3 — "logSuccess before validation (client.go:491)"
+
+Correct observation about the code, but the reputation gain is minimal and temporary. The peer gets one positive mark before processResponse rejects the payload and subsequent requests are routed elsewhere. This doesn't enable sustained amplification.
+
+Amplifying Factor 6 — "Bootstrap threshold = 4 peers: attacker controlling 4 peers can eclipse a fresh node"
+
+Eclipse attacks are a separate, well-studied problem. On mainnet, nodes quickly connect to dozens of peers beyond bootstrap. Claiming that controlling 4 bootstrap peers enables this specific amplification attack chains two separate issues (eclipse + amplification) without demonstrating either works in practice.
+
+Severity assessment — "Medium-High (Unauthenticated Remote DoS)"
+
+Overstated. The PoC demonstrates a memory allocation pattern in a unit test. It does not demonstrate that the allocation can be triggered through the protocol. We tested the exact attack against live nodes — the 120 MB payloads were built and ready to serve, but no node ever fetched them. The severity should account for the fact that reaching the vulnerable code path requires passing block validation that the PoC does not address.
+
+The PoC's remediation suggestions (memory budgets, streaming validation, null-rejection) are reasonable hardening measures regardless. The allocation pattern is real and the code would be cleaner with bounds. But the framing as an unauthenticated remote DoS misrepresents the exploitability.

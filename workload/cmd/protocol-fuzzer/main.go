@@ -183,6 +183,7 @@ func buildDeck() {
 		{"FUZZER_WEIGHT_F3_CERT_EXCHANGE", 3, getAllF3CertExAttacks()},
 		{"FUZZER_WEIGHT_HELLO_PROTOCOL", 3, getAllHelloAttacks()},
 		{"FUZZER_WEIGHT_RUST_SPECIFIC_ATTACKS", 3, getAllForestAttacks()},
+		{"FUZZER_WEIGHT_CHAINEXCHANGE_AMPLIFICATION", 0, getAllAmplificationAttacks()},
 	}
 
 	deck = nil

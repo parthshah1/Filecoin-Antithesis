@@ -111,10 +111,14 @@ if getent hosts filwizard &>/dev/null; then
     log_info "FOC sidecar started (PID=$SIDECAR_PID)"
 fi
 
-# ── 8. Launch stress engine ──
-log_info "Launching stress engine..."
-/opt/antithesis/stress-engine &
-STRESS_PID=$!
+# ── 8. Launch workload processes ──
+if [ "${STRESS_ENGINE_ENABLED:-1}" = "1" ]; then
+    log_info "Launching stress engine..."
+    /opt/antithesis/stress-engine &
+    STRESS_PID=$!
+else
+    log_info "Stress engine disabled via STRESS_ENGINE_ENABLED=0"
+fi
 
 if [ "${FUZZER_ENABLED:-1}" = "1" ]; then
     log_info "Launching protocol fuzzer..."
@@ -122,4 +126,4 @@ if [ "${FUZZER_ENABLED:-1}" = "1" ]; then
     FUZZER_PID=$!
 fi
 
-wait -n $STRESS_PID ${FUZZER_PID:-}
+wait -n ${STRESS_PID:-} ${FUZZER_PID:-}
